@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Rename resource &apos;lora_stm&apos; to &apos;LoRa_stm_v1&apos;" description="Rename resource &apos;lora_stm&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="/lora_stm" name="LoRa_stm_v1" stamp="1767898781688" updateReferences="true"/>
+</session>
