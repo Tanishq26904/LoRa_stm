@@ -1,0 +1,911 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "spi.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <string.h>
+#include <stdio.h>
+#include "LoRa.h"
+#include <stdint.h>
+#include<ctype.h>
+#include <stdlib.h>
+#include "stm32f1xx.h"
+#include "stm32f1xx_hal_flash.h"
+#include "stm32f1xx_hal_flash_ex.h"
+#define IRQ_RX_DONE        0x40
+#define IRQ_TX_DONE        0x08
+#define IRQ_PAYLOAD_CRCERR 0x20
+#define IRQ_RX_TIMEOUT     0x80
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+#define FLASH_STORAGE_START  0x0800FC00  // Last 1KB of flash
+#define FLASH_MAGIC_NUMBER   0x55AA1234
+
+typedef struct {
+    uint32_t magic;          // Validation magic number
+    uint32_t counter;        // Persistent counter
+    uint32_t device_id;      // Persistent device ID
+    uint32_t checksum;       // Simple checksum
+} stored_data_t;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+
+/* USER CODE BEGIN PV */
+LoRa myLoRa;
+uint16_t LoRa_status;
+uint32_t uid[3];
+uint8_t Master = 01;
+int nodeId = 00;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
+void flash_erase_node_page(void);
+uint8_t flash_read_node_id(void);
+void flash_save_node_id(uint8_t node_id);
+uint32_t calculate_checksum(uint32_t counter, uint32_t device_id);
+void printu(const char *msg);
+void print_reset_reason(void);
+void STM32_GetUID(uint32_t uid[3]);
+void req_Registration(void);
+uint8_t wait_for_ack(uint16_t timeout_ms);
+uint8_t LoRa_Transmit(uint8_t dst, uint8_t src, const char *payload);
+void flush_rx();
+void print_hex(const uint8_t *data, uint8_t len);
+uint8_t is_printable_string(const uint8_t *data, uint8_t len);
+void LoRa_StartPollingnode(void);
+void handle_req_data(uint8_t src_id);
+void flash_clear_storage(void);
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE BEGIN 2 */
+
+	/* ---------- SX127x RESET ---------- */
+	HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_RESET);
+	HAL_Delay(10);
+	HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_SET);
+	HAL_Delay(10);
+
+	/* ---------- NSS HIGH (IDLE) ---------- */
+	HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_SET);
+
+	/* ---------- INIT LoRa STRUCT ---------- */
+	myLoRa = newLoRa();
+	myLoRa.CS_port    = NSS_GPIO_Port;
+	myLoRa.CS_pin     = NSS_Pin;
+	myLoRa.reset_port = RESET_GPIO_Port;
+	myLoRa.reset_pin  = RESET_Pin;
+	myLoRa.DIO0_port  = DIO0_GPIO_Port;
+	myLoRa.DIO0_pin   = DIO0_Pin;
+	myLoRa.hSPIx      = &hspi1;
+
+	LoRa_status = LoRa_init(&myLoRa);
+	LoRa_setSyncWord(&myLoRa, 0x34);
+	if (LoRa_status != LORA_OK)
+	{
+	  char err[64];
+	  sprintf(err, "LoRa INIT FAILED (%d)\r\n", LoRa_status);
+	  printu(err);
+
+	  while (1)
+	  {
+		  check_clear_button();
+	  }
+	}
+
+	STM32_GetUID(uid);
+
+	uint8_t saved_node_id = flash_read_node_id();
+	if (saved_node_id != 0xFF) {  // 0xFF means invalid/uninitialized
+	    nodeId = saved_node_id;
+	    char msg[64];
+	    sprintf(msg, "Restored Node ID from flash: %02d\r\n", nodeId);
+	    printu(msg);
+	} else {
+	    printu("No valid Node ID in flash\r\n");
+	}
+
+	LoRa_enableCRC(&myLoRa, 1);
+	LoRa_setCRC(&myLoRa, 1);
+
+	// Set CAD to return to standby mode after completion
+	LoRa_setCADExitMode(&myLoRa, 0);
+
+	// Set CAD symbols (optional, default is 1)
+	LoRa_setCADSymbols(&myLoRa, 1);
+
+
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+	  if(nodeId>0)
+	  {
+		  LoRa_StartPollingnode();
+	  }
+	  else
+	  {
+		  req_Registration();// NEW: Call polling function in main loop
+	  }
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* USER CODE BEGIN 4 */
+void printu(const char *msg)
+{
+  HAL_UART_Transmit(
+      &huart1,
+      (uint8_t*)msg,
+      strlen(msg),
+      100
+  );
+}
+
+// Print data in hex format
+void print_hex(const uint8_t *data, uint8_t len)
+{
+  char hex[4];
+  for(uint8_t i = 0; i < len; i++) {
+    sprintf(hex, "%02X ", data[i]);
+    printu(hex);
+  }
+}
+
+// Check if data looks like a printable string
+uint8_t is_printable_string(const uint8_t *data, uint8_t len)
+{
+  uint8_t printable_count = 0;
+  for(uint8_t i = 0; i < len; i++) {
+    if(data[i] >= 32 && data[i] <= 126) {
+      printable_count++;
+    }
+  }
+  return (printable_count * 100 / len) > 80;
+}
+
+void STM32_GetUID(uint32_t uid[3])
+{
+    uid[0] = *(uint32_t*)0x1FFFF7E8;
+    uid[1] = *(uint32_t*)0x1FFFF7EC;
+    uid[2] = *(uint32_t*)0x1FFFF7F0;
+}
+
+void print_reset_reason(void)
+{
+    uint32_t flags = RCC->CSR;
+    if(flags & RCC_CSR_LPWRRSTF) {
+        printu("Reset Reason: Low Power (Brown-out)\r\n");
+    } else if(flags & RCC_CSR_WWDGRSTF) {
+        printu("Reset Reason: Window Watchdog\r\n");
+    } else if(flags & RCC_CSR_IWDGRSTF) {
+        printu("Reset Reason: Independent Watchdog\r\n");
+    } else if(flags & RCC_CSR_SFTRSTF) {
+        printu("Reset Reason: Software Reset\r\n");
+    } else if(flags & RCC_CSR_PORRSTF) {
+        printu("Reset Reason: Power-on Reset\r\n");
+    } else if(flags & RCC_CSR_PINRSTF) {
+        printu("Reset Reason: External Pin Reset\r\n");
+    } else {
+        printu("Reset Reason: Unknown\r\n");
+    }
+    RCC->CSR |= RCC_CSR_RMVF;
+}
+
+void req_Registration(void)
+{
+	char reg_payload[64];
+	uint8_t cadResult = LoRa_performCAD(&myLoRa, 100);
+	if(cadResult == 0)
+	{
+		snprintf(reg_payload,sizeof(reg_payload),"%02d | %08lX-%08lX-%08lX | REQ_ADDRESS",
+				nodeId,uid[0], uid[1], uid[2]);
+		LoRa_transmit(&myLoRa, (uint8_t *)reg_payload, strlen(reg_payload), 200);
+		HAL_Delay(500);
+		printu("sent \r\n");
+		HAL_Delay(500);
+	    wait_for_ack(5000);
+	}
+	else
+	{
+		printu("skipped channel busy \r\n");
+	}
+}
+
+uint8_t wait_for_ack(uint16_t timeout_ms)
+{
+    printu("waiting for ack... \r\n");
+    uint8_t rxBuf[128];
+    uint32_t start = HAL_GetTick();
+
+    // Clear IRQ flags first
+    LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
+
+    LoRa_gotoMode(&myLoRa, STNBY_MODE);
+    HAL_Delay(100);
+    LoRa_startReceiving(&myLoRa);
+
+    printu("receiving \r\n");
+
+    while ((HAL_GetTick() - start) < timeout_ms)
+    {
+        // Check if packet received (poll IRQ flags)
+        uint8_t irq = LoRa_read(&myLoRa, RegIrqFlags);
+
+        // ❌ CRC error → discard packet
+        if (irq & IRQ_PAYLOAD_CRCERR)
+        {
+            LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
+            LoRa_startReceiving(&myLoRa);
+            continue;
+        }
+
+        // ❌ RX timeout → restart RX
+        if (irq & IRQ_RX_TIMEOUT)
+        {
+            LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
+            LoRa_startReceiving(&myLoRa);
+            continue;
+        }
+
+        // ✅ Valid RX
+        if (irq & IRQ_RX_DONE)
+        {
+            uint8_t fifoAddr = LoRa_read(&myLoRa, RegFiFoRxCurrentAddr);
+            LoRa_write(&myLoRa, RegFiFoAddPtr, fifoAddr);
+            uint8_t len = LoRa_receive(&myLoRa, rxBuf, sizeof(rxBuf));
+
+            LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
+
+            if (len > 0)
+            {
+                // FIRST: Print raw data in HEX format to see what we're actually receiving
+                printu("Raw HEX: ");
+                print_hex(rxBuf, len > 40 ? 40 : len);
+                printu("\r\n");
+
+                // SECOND: Only print as string if it looks like printable text
+                if (is_printable_string(rxBuf, len))
+                {
+                    printu("As string: ");
+                    // Null terminate for printing (safely)
+                    if (len < sizeof(rxBuf)) {
+                        rxBuf[len] = '\0';
+                        printu((char *)rxBuf);
+                    } else {
+                        rxBuf[sizeof(rxBuf) - 1] = '\0';
+                        printu((char *)rxBuf);
+                    }
+                    printu("\r\n");
+                }
+                else
+                {
+                    printu("(Not a printable string)\r\n");
+                }
+
+                // Now parse the data regardless of whether it's printable
+                // Try to parse with manual string processing
+                char *ptr = (char *)rxBuf;
+
+                // Skip leading spaces
+                while (*ptr == ' ') ptr++;
+
+                // Parse first UID
+                uint32_t r_uid0 = 0;
+                for (int i = 0; i < 8 && isxdigit((unsigned char)*ptr); i++) {
+                    char hex[3] = {*ptr, '\0', '\0'};
+                    r_uid0 = (r_uid0 << 4) | strtol(hex, NULL, 16);
+                    ptr++;
+                }
+
+                // Skip dash
+                if (*ptr == '-') ptr++;
+
+                // Parse second UID
+                uint32_t r_uid1 = 0;
+                for (int i = 0; i < 8 && isxdigit((unsigned char)*ptr); i++) {
+                    char hex[3] = {*ptr, '\0', '\0'};
+                    r_uid1 = (r_uid1 << 4) | strtol(hex, NULL, 16);
+                    ptr++;
+                }
+
+                // Skip dash
+                if (*ptr == '-') ptr++;
+
+                // Parse third UID
+                uint32_t r_uid2 = 0;
+                for (int i = 0; i < 8 && isxdigit((unsigned char)*ptr); i++) {
+                    char hex[3] = {*ptr, '\0', '\0'};
+                    r_uid2 = (r_uid2 << 4) | strtol(hex, NULL, 16);
+                    ptr++;
+                }
+
+                // Skip spaces and pipe
+                while (*ptr == ' ') ptr++;
+                if (*ptr == '|') ptr++;
+                while (*ptr == ' ') ptr++;
+
+                // Parse assigned ID
+                uint8_t assignedId = 0;
+                if (isdigit((unsigned char)*ptr)) {
+                    assignedId = (*ptr - '0') * 10;
+                    ptr++;
+                    if (isdigit((unsigned char)*ptr)) {
+                        assignedId += (*ptr - '0');
+                        ptr++;
+                    }
+                }
+
+                // Skip spaces and pipe
+                while (*ptr == ' ') ptr++;
+                if (*ptr == '|') ptr++;
+                while (*ptr == ' ') ptr++;
+
+                // Parse command
+                char cmd[32] = {0};
+                int cmd_idx = 0;
+                while (*ptr && *ptr != ' ' && *ptr != '\r' && *ptr != '\n' && cmd_idx < 31) {
+                    cmd[cmd_idx++] = *ptr;
+                    ptr++;
+                }
+                cmd[cmd_idx] = '\0';
+
+                // Debug parsed values
+                char debug[150];
+                sprintf(debug, "Manual parse: uid0=%08lX, uid1=%08lX, uid2=%08lX, id=%d, cmd=",
+                        r_uid0, r_uid1, r_uid2, assignedId);
+                printu(debug);
+
+                // Only print command if it's printable
+                if (is_printable_string((uint8_t*)cmd, strlen(cmd)))
+                {
+                    printu(cmd);
+                }
+                else
+                {
+                    printu("[BINARY DATA]");
+                }
+                printu("\r\n");
+
+                sprintf(debug, "Expected UID: %08lX-%08lX-%08lX\r\n",
+                        uid[0], uid[1], uid[2]);
+                printu(debug);
+
+                // Check if it's our ACK
+                if (strcmp(cmd, "ACK_ADDRESS") == 0)
+                {
+                    if (r_uid0 == uid[0] && r_uid1 == uid[1] && r_uid2 == uid[2])
+                    {
+                        nodeId = assignedId;
+                        printu("Node ID assigned: ");
+                        char b[8];
+                        sprintf(b, "%02d\r\n", nodeId);
+                        printu(b);
+
+                        LoRa_gotoMode(&myLoRa, STNBY_MODE);
+                        HAL_Delay(10);
+
+                        // Send confirmation back
+                        LoRa_Transmit(Master, nodeId, "ACK_ADDRESS");
+                        // SAVE TO FLASH if nodeId > 0
+						if (nodeId > 0) {
+							flash_save_node_id(nodeId);
+							printu("Node ID saved to flash\r\n");
+						}
+                        return nodeId;
+                    }
+                    else
+                    {
+                        printu("UID mismatch!\r\n");
+                    }
+                }
+                else
+                {
+                    printu("Wrong command\r\n");
+                }
+
+                // Restart receiving
+                LoRa_startReceiving(&myLoRa);
+            }
+        }
+
+        HAL_Delay(1);
+    }
+
+    printu("Timeout waiting for ACK\r\n");
+    LoRa_gotoMode(&myLoRa, STNBY_MODE);
+    return 0xFF;
+}
+
+uint8_t LoRa_Transmit(uint8_t dst, uint8_t src, const char *payload)
+{
+    char txBuf[64];
+
+    snprintf(txBuf, sizeof(txBuf),
+             "%02d | %02d | %s",
+             dst,
+             src,
+             payload);
+    printu("TX -> ");
+    printu(txBuf);
+    printu("\r\n");
+
+    uint16_t tx = LoRa_transmit(
+                    &myLoRa,
+                    (uint8_t *)txBuf,
+                    strlen(txBuf),
+                    200
+                  );
+    if(tx==1)
+    {
+    	return 1;
+    }
+    else
+    {
+    	return 0;
+    }
+}
+
+// NEW: Main polling function
+void LoRa_StartPollingnode(void)
+{
+    static uint8_t isReceiving = 0;
+    uint8_t rxBuf[128];
+
+    // Only poll if we have a valid node ID
+    if (nodeId == 0) {
+        return; // Not registered yet
+    }
+
+    // Start receiving if not already
+    if (!isReceiving) {
+        LoRa_gotoMode(&myLoRa, STNBY_MODE);
+        HAL_Delay(10);
+        LoRa_startReceiving(&myLoRa);
+        isReceiving = 1;
+    }
+
+    // Check if packet received (poll IRQ flags)
+    uint8_t irq = LoRa_read(&myLoRa, RegIrqFlags);
+
+    // ❌ CRC error → discard packet
+    if (irq & IRQ_PAYLOAD_CRCERR)
+    {
+        LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
+        LoRa_startReceiving(&myLoRa);
+        return;
+    }
+
+    // ❌ RX timeout → restart RX
+    if (irq & IRQ_RX_TIMEOUT)
+    {
+        LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
+        LoRa_startReceiving(&myLoRa);
+        return;
+    }
+
+    // ✅ Valid RX
+    if (irq & IRQ_RX_DONE)
+    {
+        uint8_t fifoAddr = LoRa_read(&myLoRa, RegFiFoRxCurrentAddr);
+        LoRa_write(&myLoRa, RegFiFoAddPtr, fifoAddr);
+        uint8_t len = LoRa_receive(&myLoRa, rxBuf, sizeof(rxBuf));
+
+        LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
+
+        if (len > 0 && len <= sizeof(rxBuf))
+        {
+            // Null terminate for string operations
+            rxBuf[len] = '\0';
+
+            // Debug print
+            printu("Poll RX: ");
+            printu((char *)rxBuf);
+            printu("\r\n");
+
+            // Check if packet contains REQ_DATA and is in format: %02d | %02d | payload
+            char *req_data_ptr = strstr((char *)rxBuf, "REQ_DATA");
+
+            if (req_data_ptr != NULL)
+            {
+                // Found "REQ_DATA" in packet
+                // Now check if it's in the correct format and for us
+                char buffer[128];
+                strncpy(buffer, (char *)rxBuf, sizeof(buffer)-1);
+                buffer[sizeof(buffer)-1] = '\0';
+
+                // Parse format: "dst | src | REQ_DATA"
+                uint8_t dst_id, src_id;
+                char payload[64];
+
+                // Try to parse using sscanf
+                int parsed = sscanf(buffer, "%hhu | %hhu | %63[^\r\n]",
+                                   &dst_id, &src_id, payload);
+
+                if (parsed == 3)
+                {
+                    // Successfully parsed
+                    // Check if destination is our node ID or broadcast (0xFF)
+                    if (dst_id == nodeId || dst_id == 0xFF)
+                    {
+                        // Check if source is master (01) and payload is REQ_DATA
+                        if (src_id == Master && strcmp(payload, "REQ_DATA") == 0)
+                        {
+                            printu("REQ_DATA from master received!\r\n");
+                            handle_req_data(src_id);
+                        }
+                    }
+                    else
+                    {
+                        printu("Packet not for us (dst=");
+                        char msg[20];
+                        sprintf(msg, "%02d, we=%02d)\r\n", dst_id, nodeId);
+                        printu(msg);
+                    }
+                }
+                else
+                {
+                    // Try alternative parsing with strtok
+                    char *token;
+                    char *rest = buffer;
+                    int part = 0;
+                    uint8_t parsed_dst = 0, parsed_src = 0;
+
+                    token = strtok_r(rest, "|", &rest);
+                    while (token != NULL && part < 3) {
+                        // Trim whitespace
+                        while (*token == ' ') token++;
+                        char *end = token + strlen(token) - 1;
+                        while (end > token && (*end == ' ' || *end == '\r' || *end == '\n')) {
+                            *end = '\0';
+                            end--;
+                        }
+
+                        if (part == 0) {
+                            parsed_dst = atoi(token);
+                        } else if (part == 1) {
+                            parsed_src = atoi(token);
+                        } else if (part == 2) {
+                            // Check if this is REQ_DATA
+                            if (strcmp(token, "REQ_DATA") == 0) {
+                                if (parsed_dst == nodeId || parsed_dst == 0xFF) {
+                                    if (parsed_src == Master) {
+                                        printu("REQ_DATA from master (alt parse)\r\n");
+                                        handle_req_data(parsed_src);
+                                    }
+                                }
+                            }
+                        }
+                        part++;
+                        token = strtok_r(rest, "|", &rest);
+                    }
+                }
+            }
+            else
+            {
+                printu("No REQ_DATA in packet\r\n");
+            }
+        }
+
+        // Restart receiving for next packet
+        LoRa_startReceiving(&myLoRa);
+    }
+}
+
+// NEW: Handle REQ_DATA command from master
+void handle_req_data(uint8_t src_id)
+{
+    printu("Processing REQ_DATA from master\r\n");
+
+    // Example: Send sensor data back to master
+    // You can modify this to send your actual data
+    char sensor_data[64];
+
+    // Example: Simulate some sensor reading
+    uint16_t temperature = 25;  // Example temperature value
+    uint16_t humidity = 60;     // Example humidity value
+
+    // Format the data response
+    snprintf(sensor_data, sizeof(sensor_data),
+             "DATA_RESPONSE|TEMP=%d|HUM=%d|NODE=%02d",
+             temperature, humidity, nodeId);
+
+    // Send the data back to master
+    LoRa_Transmit(src_id, nodeId, sensor_data);
+
+    printu("Data sent to master\r\n");
+}
+
+void flush_rx()
+{
+    uint8_t tmp[128];
+    while (LoRa_receive(&myLoRa, tmp, sizeof(tmp)) > 0) {
+        HAL_Delay(2);
+    }
+}
+
+// ==================== FLASH STORAGE FOR NODE ID ====================
+
+void flash_erase_node_page(void) {
+    HAL_FLASH_Unlock();
+
+    FLASH_EraseInitTypeDef erase = {0};
+    erase.TypeErase = FLASH_TYPEERASE_PAGES;
+    erase.PageAddress = FLASH_STORAGE_START;
+    erase.NbPages = 1;  // 1KB page for F103
+
+    uint32_t page_error = 0;
+    HAL_FLASHEx_Erase(&erase, &page_error);
+
+    HAL_FLASH_Lock();
+}
+
+uint8_t flash_read_node_id(void) {
+    stored_data_t* data = (stored_data_t*)FLASH_STORAGE_START;
+
+    // Check if data is valid
+    if (data->magic == FLASH_MAGIC_NUMBER &&
+        data->checksum == calculate_checksum(data->counter, data->device_id)) {
+
+        // Return node ID (stored in counter field for simplicity)
+        // Only return if it's a valid node ID (1-99)
+        if (data->counter <= 99) {
+            return (uint8_t)data->counter;
+        }
+    }
+
+    return 0xFF;  // Invalid or no data
+}
+
+void flash_save_node_id(uint8_t node_id) {
+    stored_data_t data;
+
+    // Generate device ID from UID
+    uint32_t device_id = (uid[0] ^ uid[1] ^ uid[2]) & 0x00FFFFFF;
+
+    // Fill the structure
+    data.magic = FLASH_MAGIC_NUMBER;
+    data.counter = node_id;           // Store node ID in counter field
+    data.device_id = device_id;       // Store device ID
+    data.checksum = calculate_checksum(data.counter, data.device_id);
+
+    // Erase the flash page before writing
+    flash_erase_node_page();
+
+    HAL_FLASH_Unlock();
+
+    // Write the data structure to flash
+    uint8_t* data_ptr = (uint8_t*)&data;
+    for (uint32_t i = 0; i < sizeof(data); i += 4) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                         FLASH_STORAGE_START + i,
+                         *(uint32_t*)(data_ptr + i));
+    }
+
+    HAL_FLASH_Lock();
+
+    // Verify the write
+    uint8_t verify_id = flash_read_node_id();
+    if (verify_id != node_id) {
+        printu("Flash write verification failed!\r\n");
+    } else {
+        char msg[32];
+        sprintf(msg, "Node ID %02d saved successfully\r\n", node_id);
+        printu(msg);
+    }
+}
+
+uint32_t calculate_checksum(uint32_t counter, uint32_t device_id) {
+    // Simple checksum: XOR with a constant
+    return counter ^ device_id ^ 0xDEADBEEF;
+}
+
+void flash_clear_storage(void) {
+    printu("\r\n=== CLEARING FLASH STORAGE ===\r\n");
+
+    // Erase the flash page
+    flash_erase_node_page();
+
+    // Reset node ID in RAM
+    nodeId = 0;
+
+    printu("✓ Flash storage cleared\r\n");
+    printu("✓ Node ID reset to 00\r\n");
+    printu("=== Device will restart registration ===\r\n\r\n");
+
+    // Optional: Blink LED to indicate success
+    for(int i = 0; i < 5; i++) {
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);  // Use your LED pin
+        HAL_Delay(200);
+    }
+}
+
+void check_clear_button(void) {
+    static uint32_t press_start_time = 0;
+    static uint8_t is_clearing = 0;
+
+    // Button is active LOW (pressed = 0, released = 1 with pull-up)
+    if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET) {
+        // Button is pressed
+        if (press_start_time == 0) {
+            // Start timing
+            press_start_time = HAL_GetTick();
+            printu("[Button pressed - hold for 3s to clear]\r\n");
+        }
+        else if (!is_clearing && (HAL_GetTick() - press_start_time) > 3000) {
+            // 3 second long press detected
+            is_clearing = 1;
+            flash_clear_storage();
+
+            // Wait for button release
+            while (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_RESET) {
+                HAL_Delay(10);
+            }
+
+            is_clearing = 0;
+        }
+    }
+    else {
+        // Button released
+        if (press_start_time != 0 && !is_clearing) {
+            uint32_t press_duration = HAL_GetTick() - press_start_time;
+
+            if (press_duration < 3000) {
+                char msg[50];
+                sprintf(msg, "[Button released after %lums]\r\n", press_duration);
+                printu(msg);
+            }
+        }
+        press_start_time = 0;
+    }
+}
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

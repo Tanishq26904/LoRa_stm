@@ -1,0 +1,396 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <string.h>
+#include <stdio.h>
+#include "LoRa.h"
+#include <stdint.h>
+#include "stm32f1xx.h"
+#include "stm32f1xx_hal_flash.h"
+#include "stm32f1xx_hal_flash_ex.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+// Flash storage configuration
+#define FLASH_STORAGE_START  0x0800FC00  // Last 1KB page of 64KB flash
+#define FLASH_MAGIC_NUMBER   0x55AA1234  // Magic number to validate data
+#define FLASH_DATA_ADDR      (FLASH_STORAGE_START + 4)  // After magic number
+
+// Structure for stored data
+typedef struct {
+    uint32_t magic;          // Validation magic number
+    uint32_t counter;        // Persistent counter
+    uint32_t device_id;      // Persistent device ID
+    uint32_t checksum;       // Simple checksum
+} stored_data_t;
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+SPI_HandleTypeDef hspi1;
+UART_HandleTypeDef huart1;
+
+/* USER CODE BEGIN PV */
+LoRa myLoRa;
+uint16_t LoRa_status;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+void MX_GPIO_Init(void);
+void MX_SPI1_Init(void);
+void MX_USART1_UART_Init(void);
+/* USER CODE BEGIN PFP */
+void printu(const char *msg);
+void print_reset_reason(void);
+void STM32_GetUID(uint32_t uid[3]);
+
+// Flash storage functions
+uint32_t flash_read_counter(void);
+void flash_save_counter(uint32_t counter);
+uint32_t flash_read_device_id(void);
+void flash_save_device_id(uint32_t id);
+void flash_erase_page(void);
+uint32_t calculate_checksum(uint32_t counter, uint32_t device_id);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+extern SPI_HandleTypeDef hspi1;
+extern UART_HandleTypeDef huart1;
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE BEGIN 2 */
+  uint32_t uid[3];
+  STM32_GetUID(uid);
+
+  // Generate unique device ID from UID (simple hash)
+  uint32_t device_id = (uid[0] ^ uid[1] ^ uid[2]) & 0x00FFFFFF;
+
+  // Read persistent counter from flash
+  uint32_t persistent_counter = flash_read_counter();
+
+  // If no valid data in flash, initialize
+  if (persistent_counter == 0xFFFFFFFF) {
+    persistent_counter = 0;
+    flash_save_counter(persistent_counter);
+    flash_save_device_id(device_id);
+    printu("Flash storage initialized\r\n");
+  } else {
+    // Verify device ID matches
+    uint32_t stored_id = flash_read_device_id();
+    if (stored_id != device_id) {
+      // Device changed or flash corrupted, reset counter
+      persistent_counter = 0;
+      flash_erase_page();  // Clear old data
+      flash_save_counter(persistent_counter);
+      flash_save_device_id(device_id);
+      printu("Device ID changed, resetting counter\r\n");
+    }
+  }
+
+  printu("\r\n===============================\r\n");
+  printu(" STM32F103 LoRa TRANSMITTER\r\n");
+  printu("===============================\r\n");
+  char info[64];
+  sprintf(info, "Device ID: %08lX\r\n", device_id);
+  printu(info);
+  sprintf(info, "Persistent Counter: %lu\r\n", persistent_counter);
+  printu(info);
+  printu("-------------------------------\r\n");
+
+  /* ---------- SX127x RESET ---------- */
+  HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_RESET);
+  HAL_Delay(10);
+  HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_SET);
+  HAL_Delay(10);
+
+  /* ---------- NSS HIGH (IDLE) ---------- */
+  HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_SET);
+
+  /* ---------- INIT LoRa STRUCT ---------- */
+  myLoRa = newLoRa();
+  myLoRa.CS_port    = NSS_GPIO_Port;
+  myLoRa.CS_pin     = NSS_Pin;
+  myLoRa.reset_port = RESET_GPIO_Port;
+  myLoRa.reset_pin  = RESET_Pin;
+  myLoRa.DIO0_port  = DIO0_GPIO_Port;
+  myLoRa.DIO0_pin   = DIO0_Pin;
+  myLoRa.hSPIx      = &hspi1;
+
+  printu("Initializing LoRa...\r\n");
+  LoRa_status = LoRa_init(&myLoRa);
+
+  if (LoRa_status != LORA_OK)
+  {
+    char err[64];
+    sprintf(err, "LoRa INIT FAILED (%d)\r\n", LoRa_status);
+    printu(err);
+
+    while (1)
+    {
+      HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);
+      HAL_Delay(200);
+    }
+  }
+
+  printu("LoRa INIT SUCCESS ✅\r\n");
+  printu("Frequency: 433 MHz\r\n");
+  printu("SF: 7 | BW: 125 kHz\r\n\r\n");
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    // Increment persistent counter
+    persistent_counter++;
+
+    // Save to flash every 10 transmissions to reduce wear
+    if (persistent_counter % 10 == 0) {
+      flash_save_counter(persistent_counter);
+    }
+
+    char payload[64];
+    snprintf(payload, sizeof(payload),
+             "ID:%08lX|CNT:%lu|UID:%08lX-%08lX-%08lX",
+             device_id, persistent_counter, uid[0], uid[1], uid[2]);
+
+    printu("TX -> ");
+    printu(payload);
+    printu("\r\n");
+
+    uint16_t tx = LoRa_transmit(
+                    &myLoRa,
+                    (uint8_t*)payload,
+                    strlen(payload),
+                    200
+                  );
+
+    if (tx == 1)
+      printu("TX OK\r\n\r\n");
+    else
+    {
+      char e[40];
+      sprintf(e, "TX FAIL (%d)\r\n\r\n", tx);
+      printu(e);
+    }
+
+    HAL_Delay(1000);
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
+
+/* USER CODE BEGIN 4 */
+// Flash storage implementation
+
+void flash_erase_page(void) {
+  HAL_FLASH_Unlock();
+
+  FLASH_EraseInitTypeDef erase;
+  erase.TypeErase = FLASH_TYPEERASE_PAGES;
+  erase.PageAddress = FLASH_STORAGE_START;
+  erase.NbPages = 1;  // 1KB page for F103
+
+  uint32_t page_error = 0;
+  HAL_FLASHEx_Erase(&erase, &page_error);
+
+  HAL_FLASH_Lock();
+}
+
+uint32_t calculate_checksum(uint32_t counter, uint32_t device_id) {
+  return counter ^ device_id ^ 0xDEADBEEF;
+}
+
+uint32_t flash_read_counter(void) {
+  stored_data_t* data = (stored_data_t*)FLASH_STORAGE_START;
+
+  // Check if data is valid
+  if (data->magic == FLASH_MAGIC_NUMBER &&
+      data->checksum == calculate_checksum(data->counter, data->device_id)) {
+    return data->counter;
+  }
+
+  return 0xFFFFFFFF;  // Invalid data
+}
+
+uint32_t flash_read_device_id(void) {
+  stored_data_t* data = (stored_data_t*)FLASH_STORAGE_START;
+
+  if (data->magic == FLASH_MAGIC_NUMBER &&
+      data->checksum == calculate_checksum(data->counter, data->device_id)) {
+    return data->device_id;
+  }
+
+  return 0xFFFFFFFF;  // Invalid data
+}
+
+void flash_save_counter(uint32_t counter) {
+  stored_data_t data;
+  data.magic = FLASH_MAGIC_NUMBER;
+  data.counter = counter;
+  data.device_id = flash_read_device_id();
+
+  // If no valid device ID, generate from UID
+  if (data.device_id == 0xFFFFFFFF) {
+    uint32_t uid[3];
+    STM32_GetUID(uid);
+    data.device_id = (uid[0] ^ uid[1] ^ uid[2]) & 0x00FFFFFF;
+  }
+
+  data.checksum = calculate_checksum(data.counter, data.device_id);
+
+  // Erase page before writing (required for flash)
+  flash_erase_page();
+
+  HAL_FLASH_Unlock();
+
+  // Write data structure
+  uint8_t* data_ptr = (uint8_t*)&data;
+  for (uint32_t i = 0; i < sizeof(data); i += 4) {
+    HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                     FLASH_STORAGE_START + i,
+                     *(uint32_t*)(data_ptr + i));
+  }
+
+  HAL_FLASH_Lock();
+
+  // Verify write
+  stored_data_t* verify = (stored_data_t*)FLASH_STORAGE_START;
+  if (verify->magic != FLASH_MAGIC_NUMBER ||
+      verify->checksum != data.checksum) {
+    printu("Flash write verification failed!\r\n");
+  }
+}
+
+void flash_save_device_id(uint32_t id) {
+  stored_data_t data;
+  data.magic = FLASH_MAGIC_NUMBER;
+  data.counter = flash_read_counter();
+  data.device_id = id;
+  data.checksum = calculate_checksum(data.counter, data.device_id);
+
+  // Erase page before writing
+  flash_erase_page();
+
+  HAL_FLASH_Unlock();
+
+  uint8_t* data_ptr = (uint8_t*)&data;
+  for (uint32_t i = 0; i < sizeof(data); i += 4) {
+    HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                     FLASH_STORAGE_START + i,
+                     *(uint32_t*)(data_ptr + i));
+  }
+
+  HAL_FLASH_Lock();
+}
+
+/* Existing functions below... */
+void printu(const char *msg)
+{
+  HAL_UART_Transmit(
+      &huart1,
+      (uint8_t*)msg,
+      strlen(msg),
+      100
+  );
+}
+
+void STM32_GetUID(uint32_t uid[3])
+{
+    uid[0] = *(uint32_t*)0x1FFFF7E8;
+    uid[1] = *(uint32_t*)0x1FFFF7EC;
+    uid[2] = *(uint32_t*)0x1FFFF7F0;
+}
+
+void print_reset_reason(void)
+{
+    uint32_t flags = RCC->CSR;
+
+    if(flags & RCC_CSR_LPWRRSTF) {
+        printu("Reset Reason: Low Power (Brown-out)\r\n");
+    } else if(flags & RCC_CSR_WWDGRSTF) {
+        printu("Reset Reason: Window Watchdog\r\n");
+    } else if(flags & RCC_CSR_IWDGRSTF) {
+        printu("Reset Reason: Independent Watchdog\r\n");
+    } else if(flags & RCC_CSR_SFTRSTF) {
+        printu("Reset Reason: Software Reset\r\n");
+    } else if(flags & RCC_CSR_PORRSTF) {
+        printu("Reset Reason: Power-on Reset\r\n");
+    } else if(flags & RCC_CSR_PINRSTF) {
+        printu("Reset Reason: External Pin Reset\r\n");
+    } else {
+        printu("Reset Reason: Unknown\r\n");
+    }
+
+    // Clear reset flags
+    RCC->CSR |= RCC_CSR_RMVF;
+}
+/* USER CODE END 4 */
+
+/* Rest of the file remains the same... */

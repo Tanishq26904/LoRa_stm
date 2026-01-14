@@ -18,6 +18,9 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "spi.h"
+#include "usart.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -26,7 +29,10 @@
 #include "LoRa.h"
 #include <stdint.h>
 #include<ctype.h>
+#include <stdlib.h>
 #include "stm32f1xx.h"
+#include "stm32f1xx_hal_flash.h"
+#include "stm32f1xx_hal_flash_ex.h"
 #define IRQ_RX_DONE        0x40
 #define IRQ_TX_DONE        0x08
 #define IRQ_PAYLOAD_CRCERR 0x20
@@ -35,7 +41,15 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+#define FLASH_STORAGE_START  0x0800FC00  // Last 1KB of flash
+#define FLASH_MAGIC_NUMBER   0x55AA1234
 
+typedef struct {
+    uint32_t magic;          // Validation magic number
+    uint32_t counter;        // Persistent counter
+    uint32_t device_id;      // Persistent device ID
+    uint32_t checksum;       // Simple checksum
+} stored_data_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -49,8 +63,6 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-extern SPI_HandleTypeDef hspi1;
-extern UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 LoRa myLoRa;
@@ -62,10 +74,12 @@ int nodeId = 00;
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-void MX_GPIO_Init(void);
-void MX_SPI1_Init(void);
-void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN PFP */
+void flash_erase_node_page(void);
+uint8_t flash_read_node_id(void);
+void flash_save_node_id(uint8_t node_id);
+uint32_t calculate_checksum(uint32_t counter, uint32_t device_id);
+char* trim_whitespace(char* str);
 void printu(const char *msg);
 void print_reset_reason(void);
 void STM32_GetUID(uint32_t uid[3]);
@@ -75,8 +89,11 @@ uint8_t LoRa_Transmit(uint8_t dst, uint8_t src, const char *payload);
 void flush_rx();
 void print_hex(const uint8_t *data, uint8_t len);
 uint8_t is_printable_string(const uint8_t *data, uint8_t len);
-void LoRa_StartPollingnode(void);  // NEW: Polling function
-void handle_req_data(uint8_t src_id);  // NEW: Handle REQ_DATA command
+void LoRa_StartPollingnode(void);
+void handle_req_data(uint8_t src_id);
+void flash_clear_storage(void);
+void check_clear_button(void);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -148,11 +165,21 @@ int main(void)
 
 	  while (1)
 	  {
-
+		  check_clear_button();
 	  }
 	}
 
 	STM32_GetUID(uid);
+
+	uint8_t saved_node_id = flash_read_node_id();
+	if (saved_node_id != 0xFF) {  // 0xFF means invalid/uninitialized
+	    nodeId = saved_node_id;
+	    char msg[64];
+	    sprintf(msg, "Restored Node ID from flash: %02d\r\n", nodeId);
+	    printu(msg);
+	} else {
+	    printu("No valid Node ID in flash\r\n");
+	}
 
 	LoRa_enableCRC(&myLoRa, 1);
 	LoRa_setCRC(&myLoRa, 1);
@@ -163,7 +190,7 @@ int main(void)
 	// Set CAD symbols (optional, default is 1)
 	LoRa_setCADSymbols(&myLoRa, 1);
 
-	req_Registration();
+
 
   /* USER CODE END 2 */
 
@@ -171,7 +198,16 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	  LoRa_StartPollingnode();  // NEW: Call polling function in main loop
+	  check_clear_button();
+
+	  if(nodeId>0)
+	  {
+		  LoRa_StartPollingnode();
+	  }
+	  else
+	  {
+		  req_Registration();// NEW: Call polling function in main loop
+	  }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -218,25 +254,27 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief SPI1 Initialization Function
-  * @param None
-  * @retval None
-  */
-
-/**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
-
 /* USER CODE BEGIN 4 */
+
+// Helper function to trim whitespace
+char* trim_whitespace(char* str) {
+    char* end;
+
+    // Trim leading space
+    while(isspace((unsigned char)*str)) str++;
+
+    if(*str == 0) return str;
+
+    // Trim trailing space
+    end = str + strlen(str) - 1;
+    while(end > str && isspace((unsigned char)*end)) end--;
+
+    // Write new null terminator
+    *(end + 1) = 0;
+
+    return str;
+}
+
 void printu(const char *msg)
 {
   HAL_UART_Transmit(
@@ -492,6 +530,11 @@ uint8_t wait_for_ack(uint16_t timeout_ms)
 
                         // Send confirmation back
                         LoRa_Transmit(Master, nodeId, "ACK_ADDRESS");
+                        // SAVE TO FLASH if nodeId > 0
+						if (nodeId > 0) {
+							flash_save_node_id(nodeId);
+							printu("Node ID saved to flash\r\n");
+						}
                         return nodeId;
                     }
                     else
@@ -534,7 +577,7 @@ uint8_t LoRa_Transmit(uint8_t dst, uint8_t src, const char *payload)
                     &myLoRa,
                     (uint8_t *)txBuf,
                     strlen(txBuf),
-                    200
+                    100
                   );
     if(tx==1)
     {
@@ -546,7 +589,9 @@ uint8_t LoRa_Transmit(uint8_t dst, uint8_t src, const char *payload)
     }
 }
 
-// NEW: Main polling function
+// NEW: Main polling function with packet filtering
+// NEW: Optimized polling function with time-based checking
+// NEW: Simple and reliable polling function
 void LoRa_StartPollingnode(void)
 {
     static uint8_t isReceiving = 0;
@@ -554,7 +599,7 @@ void LoRa_StartPollingnode(void)
 
     // Only poll if we have a valid node ID
     if (nodeId == 0) {
-        return; // Not registered yet
+        return;
     }
 
     // Start receiving if not already
@@ -563,157 +608,102 @@ void LoRa_StartPollingnode(void)
         HAL_Delay(10);
         LoRa_startReceiving(&myLoRa);
         isReceiving = 1;
+        printu("Started receiving mode\r\n");
     }
 
     // Check if packet received (poll IRQ flags)
     uint8_t irq = LoRa_read(&myLoRa, RegIrqFlags);
 
     // ❌ CRC error → discard packet
-    if (irq & IRQ_PAYLOAD_CRCERR)
-    {
+    if (irq & IRQ_PAYLOAD_CRCERR) {
         LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
         LoRa_startReceiving(&myLoRa);
         return;
     }
 
     // ❌ RX timeout → restart RX
-    if (irq & IRQ_RX_TIMEOUT)
-    {
+    if (irq & IRQ_RX_TIMEOUT) {
         LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
         LoRa_startReceiving(&myLoRa);
         return;
     }
 
     // ✅ Valid RX
-    if (irq & IRQ_RX_DONE)
-    {
+    if (irq & IRQ_RX_DONE) {
         uint8_t fifoAddr = LoRa_read(&myLoRa, RegFiFoRxCurrentAddr);
         LoRa_write(&myLoRa, RegFiFoAddPtr, fifoAddr);
         uint8_t len = LoRa_receive(&myLoRa, rxBuf, sizeof(rxBuf));
 
         LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
 
-        if (len > 0 && len <= sizeof(rxBuf))
-        {
-            // Null terminate for string operations
+        if (len > 0 && len <= sizeof(rxBuf)) {
             rxBuf[len] = '\0';
 
-            // Debug print
-            printu("Poll RX: ");
+            // Print what we received
+            printu("RX: ");
             printu((char *)rxBuf);
             printu("\r\n");
 
-            // Check if packet contains REQ_DATA and is in format: %02d | %02d | payload
+            // Simple validation - check if it contains "REQ_DATA" and is for us
             char *req_data_ptr = strstr((char *)rxBuf, "REQ_DATA");
+            if (req_data_ptr != NULL) {
+                // Try to parse quickly
+                uint8_t dst_id = 0;
+                char *ptr = (char *)rxBuf;
 
-            if (req_data_ptr != NULL)
-            {
-                // Found "REQ_DATA" in packet
-                // Now check if it's in the correct format and for us
-                char buffer[128];
-                strncpy(buffer, (char *)rxBuf, sizeof(buffer)-1);
-                buffer[sizeof(buffer)-1] = '\0';
-
-                // Parse format: "dst | src | REQ_DATA"
-                uint8_t dst_id, src_id;
-                char payload[64];
-
-                // Try to parse using sscanf
-                int parsed = sscanf(buffer, "%hhu | %hhu | %63[^\r\n]",
-                                   &dst_id, &src_id, payload);
-
-                if (parsed == 3)
-                {
-                    // Successfully parsed
-                    // Check if destination is our node ID or broadcast (0xFF)
-                    if (dst_id == nodeId || dst_id == 0xFF)
-                    {
-                        // Check if source is master (01) and payload is REQ_DATA
-                        if (src_id == Master && strcmp(payload, "REQ_DATA") == 0)
-                        {
-                            printu("REQ_DATA from master received!\r\n");
-                            handle_req_data(src_id);
-                        }
-                    }
-                    else
-                    {
-                        printu("Packet not for us (dst=");
-                        char msg[20];
-                        sprintf(msg, "%02d, we=%02d)\r\n", dst_id, nodeId);
-                        printu(msg);
-                    }
+                // Parse destination ID (first 2 digits)
+                if (isdigit(ptr[0]) && isdigit(ptr[1])) {
+                    dst_id = (ptr[0] - '0') * 10 + (ptr[1] - '0');
                 }
-                else
-                {
-                    // Try alternative parsing with strtok
-                    char *token;
-                    char *rest = buffer;
-                    int part = 0;
-                    uint8_t parsed_dst = 0, parsed_src = 0;
 
-                    token = strtok_r(rest, "|", &rest);
-                    while (token != NULL && part < 3) {
-                        // Trim whitespace
-                        while (*token == ' ') token++;
-                        char *end = token + strlen(token) - 1;
-                        while (end > token && (*end == ' ' || *end == '\r' || *end == '\n')) {
-                            *end = '\0';
-                            end--;
-                        }
+                // Check if it's for us
+                if (dst_id == nodeId || dst_id == 0xFF) {
+                    // Quick check for source ID
+                    uint8_t src_id = 0;
+                    char *pipe1 = strchr(ptr, '|');
+                    if (pipe1) {
+                        pipe1++; // Skip '|'
+                        while (*pipe1 == ' ') pipe1++;
 
-                        if (part == 0) {
-                            parsed_dst = atoi(token);
-                        } else if (part == 1) {
-                            parsed_src = atoi(token);
-                        } else if (part == 2) {
-                            // Check if this is REQ_DATA
-                            if (strcmp(token, "REQ_DATA") == 0) {
-                                if (parsed_dst == nodeId || parsed_dst == 0xFF) {
-                                    if (parsed_src == Master) {
-                                        printu("REQ_DATA from master (alt parse)\r\n");
-                                        handle_req_data(parsed_src);
-                                    }
-                                }
+                        if (isdigit(pipe1[0]) && isdigit(pipe1[1])) {
+                            src_id = (pipe1[0] - '0') * 10 + (pipe1[1] - '0');
+
+                            if (src_id == Master) {
+                                printu("REQ_DATA from master received!\r\n");
+                                handle_req_data(src_id);
                             }
                         }
-                        part++;
-                        token = strtok_r(rest, "|", &rest);
                     }
                 }
-            }
-            else
-            {
-                printu("No REQ_DATA in packet\r\n");
             }
         }
 
-        // Restart receiving for next packet
+        // Restart receiving
         LoRa_startReceiving(&myLoRa);
     }
 }
-
-// NEW: Handle REQ_DATA command from master
+// NEW: Faster response function
 void handle_req_data(uint8_t src_id)
 {
-    printu("Processing REQ_DATA from master\r\n");
-
-    // Example: Send sensor data back to master
-    // You can modify this to send your actual data
+    // Create and send response immediately
     char sensor_data[64];
 
-    // Example: Simulate some sensor reading
-    uint16_t temperature = 25;  // Example temperature value
-    uint16_t humidity = 60;     // Example humidity value
+    // Get sensor data (simulated or real)
+    uint16_t temperature = 25;
+    uint16_t humidity = 60;
 
-    // Format the data response
+    // Quick format - simpler to parse
     snprintf(sensor_data, sizeof(sensor_data),
-             "DATA_RESPONSE|TEMP=%d|HUM=%d|NODE=%02d",
-             temperature, humidity, nodeId);
+             "%02d | %02d | DATA|T=%d|H=%d",
+             src_id, nodeId, temperature, humidity);
 
-    // Send the data back to master
-    LoRa_Transmit(src_id, nodeId, sensor_data);
+    // Send immediately
+    printu("TX -> ");
+    printu(sensor_data);
+    printu("\r\n");
 
-    printu("Data sent to master\r\n");
+    // Use LoRa_transmit directly for speed
+    LoRa_transmit(&myLoRa, (uint8_t *)sensor_data, strlen(sensor_data), 100);
 }
 
 void flush_rx()
@@ -724,6 +714,141 @@ void flush_rx()
     }
 }
 
+// ==================== FLASH STORAGE FOR NODE ID ====================
+
+void flash_erase_node_page(void) {
+    HAL_FLASH_Unlock();
+
+    FLASH_EraseInitTypeDef erase = {0};
+    erase.TypeErase = FLASH_TYPEERASE_PAGES;
+    erase.PageAddress = FLASH_STORAGE_START;
+    erase.NbPages = 1;  // 1KB page for F103
+
+    uint32_t page_error = 0;
+    HAL_FLASHEx_Erase(&erase, &page_error);
+
+    HAL_FLASH_Lock();
+}
+
+uint8_t flash_read_node_id(void) {
+    stored_data_t* data = (stored_data_t*)FLASH_STORAGE_START;
+
+    // Check if data is valid
+    if (data->magic == FLASH_MAGIC_NUMBER &&
+        data->checksum == calculate_checksum(data->counter, data->device_id)) {
+
+        // Return node ID (stored in counter field for simplicity)
+        // Only return if it's a valid node ID (1-99)
+        if (data->counter <= 99) {
+            return (uint8_t)data->counter;
+        }
+    }
+
+    return 0xFF;  // Invalid or no data
+}
+
+void flash_save_node_id(uint8_t node_id) {
+    stored_data_t data;
+
+    // Generate device ID from UID
+    uint32_t device_id = (uid[0] ^ uid[1] ^ uid[2]) & 0x00FFFFFF;
+
+    // Fill the structure
+    data.magic = FLASH_MAGIC_NUMBER;
+    data.counter = node_id;           // Store node ID in counter field
+    data.device_id = device_id;       // Store device ID
+    data.checksum = calculate_checksum(data.counter, data.device_id);
+
+    // Erase the flash page before writing
+    flash_erase_node_page();
+
+    HAL_FLASH_Unlock();
+
+    // Write the data structure to flash
+    uint8_t* data_ptr = (uint8_t*)&data;
+    for (uint32_t i = 0; i < sizeof(data); i += 4) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                         FLASH_STORAGE_START + i,
+                         *(uint32_t*)(data_ptr + i));
+    }
+
+    HAL_FLASH_Lock();
+
+    // Verify the write
+    uint8_t verify_id = flash_read_node_id();
+    if (verify_id != node_id) {
+        printu("Flash write verification failed!\r\n");
+    } else {
+        char msg[32];
+        sprintf(msg, "Node ID %02d saved successfully\r\n", node_id);
+        printu(msg);
+    }
+}
+
+uint32_t calculate_checksum(uint32_t counter, uint32_t device_id) {
+    // Simple checksum: XOR with a constant
+    return counter ^ device_id ^ 0xDEADBEEF;
+}
+
+void flash_clear_storage(void) {
+    printu("\r\n=== CLEARING FLASH STORAGE ===\r\n");
+
+    // Erase the flash page
+    flash_erase_node_page();
+
+    // Reset node ID in RAM
+    nodeId = 0;
+
+    printu("✓ Flash storage cleared\r\n");
+    printu("✓ Node ID reset to 00\r\n");
+    printu("=== Device will restart registration ===\r\n\r\n");
+
+    // Optional: Blink LED to indicate success
+    for(int i = 0; i < 5; i++) {
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);  // Use your LED pin
+        HAL_Delay(200);
+    }
+}
+
+void check_clear_button(void) {
+    static uint32_t press_start_time = 0;
+    static uint8_t is_clearing = 0;
+
+    // Button is active LOW (pressed = 0, released = 1 with pull-up)
+    if (HAL_GPIO_ReadPin(Erase_GPIO_Port, Erase_Pin) == GPIO_PIN_RESET) {
+        // Button is pressed
+        if (press_start_time == 0) {
+            // Start timing
+            press_start_time = HAL_GetTick();
+            printu("[Button pressed - hold for 3s to clear]\r\n");
+        }
+        else if (!is_clearing && (HAL_GetTick() - press_start_time) > 3000) {
+            // 3 second long press detected
+            is_clearing = 1;
+            flash_clear_storage();
+
+            // Wait for button release
+            while (HAL_GPIO_ReadPin(Erase_GPIO_Port, Erase_Pin) == GPIO_PIN_RESET) {
+                HAL_Delay(10);
+            }
+
+            is_clearing = 0;
+        }
+    }
+    else {
+        // Button released
+        if (press_start_time != 0 && !is_clearing) {
+            uint32_t press_duration = HAL_GetTick() - press_start_time;
+
+            if (press_duration < 3000) {
+                char msg[50];
+                sprintf(msg, "[Button released after %lums]\r\n", press_duration);
+                printu(msg);
+            }
+        }
+        press_start_time = 0;
+    }
+}
 /* USER CODE END 4 */
 
 /**
@@ -739,7 +864,6 @@ void Error_Handler(void)
   }
   /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number

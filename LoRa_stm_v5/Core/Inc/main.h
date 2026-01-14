@@ -57,6 +57,8 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define Erase_Pin GPIO_PIN_13
+#define Erase_GPIO_Port GPIOC
 #define DIO0_Pin GPIO_PIN_1
 #define DIO0_GPIO_Port GPIOA
 #define NSS_Pin GPIO_PIN_0
