@@ -1,10 +1,3 @@
-// -------------------------------------------------- \\
-// |                                                | \\
-// |            WRITTEN BY: Sslman Motlaq           | \\
-// |               Telegram: @S_Motlaq              | \\
-// |         E-MAIL:  pilot.motlaq@gmail.com        | \\
-// |                                                | \\
-// -------------------------------------------------- //
 
 #include "main.h"
 
@@ -14,10 +7,9 @@
 //--------- MODES ---------//
 #define SLEEP_MODE			0
 #define	STNBY_MODE			1
-#define TRANSMIT_MODE	    3
-#define RXCONTIN_MODE		5
-#define RXSINGLE_MODE		6
-#define CAD_MODE            7
+#define TRANSMIT_MODE			3
+#define RXCONTIN_MODE			5
+#define RXSINGLE_MODE			6
 
 //------- BANDWIDTH -------//
 #define BW_7_8KHz			0
@@ -80,13 +72,13 @@
 #define RegVersion			0x42
 
 //------ LORA STATUS ------//
-#define LORA_OK				200
+#define LORA_OK				    200
 #define LORA_NOT_FOUND			404
 #define LORA_LARGE_PAYLOAD		413
 #define LORA_UNAVAILABLE		503
 
 typedef struct LoRa_setting{
-
+	
 	// Hardware setings:
 	GPIO_TypeDef*		CS_port;
 	uint16_t		CS_pin;
@@ -95,7 +87,7 @@ typedef struct LoRa_setting{
 	GPIO_TypeDef*		DIO0_port;
 	uint16_t		DIO0_pin;
 	SPI_HandleTypeDef*	hSPIx;
-
+	
 	// Module settings:
 	int			current_mode;
 	int 			frequency;
@@ -105,7 +97,7 @@ typedef struct LoRa_setting{
 	uint16_t		preamble;
 	uint8_t			power;
 	uint8_t			overCurrentProtection;
-
+	
 } LoRa;
 
 LoRa newLoRa(void);
@@ -131,15 +123,5 @@ void LoRa_startReceiving(LoRa* _LoRa);
 uint8_t LoRa_receive(LoRa* _LoRa, uint8_t* data, uint8_t length);
 void LoRa_receive_IT(LoRa* _LoRa, uint8_t* data, uint8_t length);
 int LoRa_getRSSI(LoRa* _LoRa);
-void LoRa_setCADMode(LoRa* _LoRa);
-uint8_t LoRa_isCADDone(LoRa* _LoRa);
-uint8_t LoRa_isCADDetected(LoRa* _LoRa);
-uint8_t LoRa_performCAD(LoRa* _LoRa, uint16_t timeout);
-void LoRa_enableCRC(LoRa* _LoRa, uint8_t enable);
-void LoRa_setCRC(LoRa* _LoRa, uint8_t crc);
-uint8_t LoRa_checkCRCError(LoRa* _LoRa);
-uint8_t LoRa_performCAD_withRetry(LoRa* _LoRa, uint8_t attempts, uint16_t cadTimeout, uint16_t retryDelay);
-void LoRa_setCADSymbols(LoRa* _LoRa, uint8_t symbols);
-void LoRa_setCADExitMode(LoRa* _LoRa, uint8_t mode);
 
 uint16_t LoRa_init(LoRa* _LoRa);

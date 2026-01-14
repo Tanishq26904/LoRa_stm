@@ -79,9 +79,6 @@ void LoRa_gotoMode(LoRa* _LoRa, int mode){
 	}else if (mode == RXSINGLE_MODE){
 		data = (read & 0xF8) | 0x06;
 		_LoRa->current_mode = RXSINGLE_MODE;
-	}else if (mode == CAD_MODE){  // Add this case
-		data = (read & 0xF8) | 0x07;
-		_LoRa->current_mode = CAD_MODE;
 	}
 
 	LoRa_write(_LoRa, RegOpMode, data);
@@ -427,30 +424,33 @@ uint8_t LoRa_isvalid(LoRa* _LoRa){
 		returns     : 1 in case of success, 0 in case of timeout
 \* ----------------------------------------------------------------------------- */
 uint8_t LoRa_transmit(LoRa* _LoRa, uint8_t* data, uint8_t length, uint16_t timeout){
-	uint8_t read;
+    uint8_t read;
+    uint32_t start_time = HAL_GetTick();  // Get current tick count
 
-	int mode = _LoRa->current_mode;
-	LoRa_gotoMode(_LoRa, STNBY_MODE);
-	read = LoRa_read(_LoRa, RegFiFoTxBaseAddr);
-	LoRa_write(_LoRa, RegFiFoAddPtr, read);
-	LoRa_write(_LoRa, RegPayloadLength, length);
-	LoRa_BurstWrite(_LoRa, RegFiFo, data, length);
-	LoRa_gotoMode(_LoRa, TRANSMIT_MODE);
-	while(1){
-		read = LoRa_read(_LoRa, RegIrqFlags);
-		if((read & 0x08)!=0){
-			LoRa_write(_LoRa, RegIrqFlags, 0xFF);
-			LoRa_gotoMode(_LoRa, mode);
-			return 1;
-		}
-		else{
-			if(--timeout==0){
-				LoRa_gotoMode(_LoRa, mode);
-				return 0;
-			}
-		}
-		HAL_Delay(1);
-	}
+    int mode = _LoRa->current_mode;
+    LoRa_gotoMode(_LoRa, STNBY_MODE);
+    read = LoRa_read(_LoRa, RegFiFoTxBaseAddr);
+    LoRa_write(_LoRa, RegFiFoAddPtr, read);
+    LoRa_write(_LoRa, RegPayloadLength, length);
+    LoRa_BurstWrite(_LoRa, RegFiFo, data, length);
+    LoRa_gotoMode(_LoRa, TRANSMIT_MODE);
+
+    while(1){
+        read = LoRa_read(_LoRa, RegIrqFlags);
+        if((read & 0x08)!=0){  // TxDone flag
+            LoRa_write(_LoRa, RegIrqFlags, 0xFF);
+            LoRa_gotoMode(_LoRa, mode);
+            return 1;  // Success
+        }
+
+        // Check timeout using HAL_GetTick()
+        if((HAL_GetTick() - start_time) >= timeout){
+            LoRa_gotoMode(_LoRa, mode);
+            return 0;  // Timeout
+        }
+
+        HAL_Delay(1);
+    }
 }
 
 /* ----------------------------------------------------------------------------- *\
@@ -479,26 +479,27 @@ void LoRa_startReceiving(LoRa* _LoRa){
 
 		returns     : The number of bytes received
 \* ----------------------------------------------------------------------------- */
-uint8_t LoRa_receive(LoRa* _LoRa, uint8_t* data, uint8_t length)
-{
-    uint8_t irq = LoRa_read(_LoRa, RegIrqFlags);
-    uint8_t bytes = 0;
+uint8_t LoRa_receive(LoRa* _LoRa, uint8_t* data, uint8_t length){
+	uint8_t read;
+	uint8_t number_of_bytes;
+	uint8_t min = 0;
 
-    if (irq & 0x40)   // RxDone
-    {
-        LoRa_write(_LoRa, RegIrqFlags, 0xFF);
+	for(int i=0; i<length; i++)
+		data[i]=0;
 
-        bytes = LoRa_read(_LoRa, RegRxNbBytes);
-        uint8_t addr = LoRa_read(_LoRa, RegFiFoRxCurrentAddr);
-        LoRa_write(_LoRa, RegFiFoAddPtr, addr);
-
-        if (bytes > length) bytes = length;
-
-        for (uint8_t i = 0; i < bytes; i++)
-            data[i] = LoRa_read(_LoRa, RegFiFo);
-    }
-
-    return bytes;
+	LoRa_gotoMode(_LoRa, STNBY_MODE);
+	read = LoRa_read(_LoRa, RegIrqFlags);
+	if((read & 0x40) != 0){
+		LoRa_write(_LoRa, RegIrqFlags, 0xFF);
+		number_of_bytes = LoRa_read(_LoRa, RegRxNbBytes);
+		read = LoRa_read(_LoRa, RegFiFoRxCurrentAddr);
+		LoRa_write(_LoRa, RegFiFoAddPtr, read);
+		min = length >= number_of_bytes ? number_of_bytes : length;
+		for(int i=0; i<min; i++)
+			data[i] = LoRa_read(_LoRa, RegFiFo);
+	}
+	LoRa_gotoMode(_LoRa, RXCONTIN_MODE);
+    return min;
 }
 
 /* ----------------------------------------------------------------------------- *\
@@ -515,233 +516,6 @@ int LoRa_getRSSI(LoRa* _LoRa){
 	uint8_t read;
 	read = LoRa_read(_LoRa, RegPktRssiValue);
 	return -164 + read;
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_setCADMode
-
-		description : set LoRa to CAD mode
-
-		arguments   :
-			LoRa* LoRa    --> LoRa object handler
-
-		returns     : Nothing
-\* ----------------------------------------------------------------------------- */
-void LoRa_setCADMode(LoRa* _LoRa){
-	LoRa_gotoMode(_LoRa, CAD_MODE);
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_startCAD
-
-		description : Start Channel Activity Detection
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-
-		returns     : Nothing
-\* ----------------------------------------------------------------------------- */
-void LoRa_startCAD(LoRa* _LoRa){
-	LoRa_setCADMode(_LoRa);
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_isCADDetected
-
-		description : Check if CAD detected activity on channel
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-
-		returns     : 1 if activity detected, 0 otherwise
-\* ----------------------------------------------------------------------------- */
-uint8_t LoRa_isCADDetected(LoRa* _LoRa){
-	uint8_t cadFlags = LoRa_read(_LoRa, RegIrqFlags);
-
-	// Check CadDetected flag (bit 0)
-	if(cadFlags & 0x01){
-		// Clear CadDetected flag
-		LoRa_write(_LoRa, RegIrqFlags, cadFlags & 0xFE);
-		return 1;
-	}
-
-	// Check CadDone flag (bit 2) - optional, depends on your needs
-	// if(cadFlags & 0x04){
-	//     LoRa_write(_LoRa, RegIrqFlags, cadFlags & 0xFB);
-	// }
-
-	return 0;
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_isCADDone
-
-		description : Check if CAD operation is complete
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-
-		returns     : 1 if CAD done, 0 otherwise
-\* ----------------------------------------------------------------------------- */
-uint8_t LoRa_isCADDone(LoRa* _LoRa){
-	uint8_t cadFlags = LoRa_read(_LoRa, RegIrqFlags);
-
-	// Check CadDone flag (bit 2)
-	if(cadFlags & 0x04){
-		// Clear CadDone flag
-		LoRa_write(_LoRa, RegIrqFlags, cadFlags & 0xFB);
-		return 1;
-	}
-
-	return 0;
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_performCAD
-
-		description : Perform CAD and wait for result with timeout
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-			uint16_t timeout  --> Timeout in milliseconds
-
-		returns     : 1 if activity detected, 0 if no activity, 255 if timeout
-\* ----------------------------------------------------------------------------- */
-uint8_t LoRa_performCAD(LoRa* _LoRa, uint16_t timeout){
-	// Start CAD
-	LoRa_startCAD(_LoRa);
-
-	// Wait for CAD to complete
-	while(timeout--){
-		if(LoRa_isCADDone(_LoRa)){
-			// Check if activity was detected
-			return LoRa_isCADDetected(_LoRa);
-		}
-		HAL_Delay(1);
-	}
-
-	// Timeout
-	return 255;
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_setCADSymbols
-
-		description : Set number of symbols for CAD (default is 1+ symbols)
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-			uint8_t symbols   --> Number of symbols (valid: 1, 2, 4, 8, 16)
-
-		returns     : Nothing
-\* ----------------------------------------------------------------------------- */
-void LoRa_setCADSymbols(LoRa* _LoRa, uint8_t symbols){
-	uint8_t regValue = LoRa_read(_LoRa, 0x31);  // RegDetectOptimize
-	uint8_t mask;
-
-	// Validate and set CAD symbols
-	if(symbols == 1) mask = 0x00;
-	else if(symbols == 2) mask = 0x01;
-	else if(symbols == 4) mask = 0x02;
-	else if(symbols == 8) mask = 0x03;
-	else if(symbols == 16) mask = 0x04;
-	else mask = 0x00;  // Default to 1 symbol
-
-	regValue = (regValue & 0xF8) | mask;
-	LoRa_write(_LoRa, 0x31, regValue);
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_setCADExitMode
-
-		description : Set what happens after CAD completes
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-			uint8_t mode      --> 0: Return to STDBY, 1: Return to RX mode
-
-		returns     : Nothing
-\* ----------------------------------------------------------------------------- */
-void LoRa_setCADExitMode(LoRa* _LoRa, uint8_t mode){
-	uint8_t regValue = LoRa_read(_LoRa, 0x31);  // RegDetectOptimize
-
-	if(mode){
-		// Set bit 7 to return to RX mode after CAD
-		regValue |= 0x80;
-	} else {
-		// Clear bit 7 to return to STDBY after CAD
-		regValue &= 0x7F;
-	}
-
-	LoRa_write(_LoRa, 0x31, regValue);
-}
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_enableCRC
-
-		description : Enable or disable CRC checking
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-			uint8_t enable    --> 1 to enable, 0 to disable
-
-		returns     : Nothing
-\* ----------------------------------------------------------------------------- */
-void LoRa_enableCRC(LoRa* _LoRa, uint8_t enable){
-	uint8_t read = LoRa_read(_LoRa, RegModemConfig2);
-
-	if(enable){
-		read |= 0x04;  // Set bit 2 (RxPayloadCrcOn)
-	} else {
-		read &= ~0x04; // Clear bit 2
-	}
-
-	LoRa_write(_LoRa, RegModemConfig2, read);
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_setCRC
-
-		description : Set CRC explicitly (alternative method)
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-			uint8_t crc       --> 0: CRC off, 1: CRC on
-
-		returns     : Nothing
-\* ----------------------------------------------------------------------------- */
-void LoRa_setCRC(LoRa* _LoRa, uint8_t crc){
-	uint8_t config2 = LoRa_read(_LoRa, RegModemConfig2);
-
-	if(crc){
-		config2 |= 0x04;  // Enable CRC
-	} else {
-		config2 &= ~0x04; // Disable CRC
-	}
-
-	LoRa_write(_LoRa, RegModemConfig2, config2);
-}
-
-/* ----------------------------------------------------------------------------- *\
-		name        : LoRa_checkCRCError
-
-		description : Check if last received packet had CRC error
-
-		arguments   :
-			LoRa*    LoRa     --> LoRa object handler
-
-		returns     : 1 if CRC error, 0 if no error
-\* ----------------------------------------------------------------------------- */
-uint8_t LoRa_checkCRCError(LoRa* _LoRa){
-	uint8_t irqFlags = LoRa_read(_LoRa, RegIrqFlags);
-
-	// Check PayloadCrcError flag (bit 5)
-	if(irqFlags & 0x20){
-		// Clear the flag
-		LoRa_write(_LoRa, RegIrqFlags, irqFlags);
-		return 1;
-	}
-
-	return 0;
 }
 
 /* ----------------------------------------------------------------------------- *\
