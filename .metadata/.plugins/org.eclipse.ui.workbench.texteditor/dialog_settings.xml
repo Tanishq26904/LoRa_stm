@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<section name="Workbench">
+	<item key="hasShownOverlayPopupBefore" value="true"/>
+	<item key="replaceBarOpen" value="false"/>
+	<list key="searchhistory">
+		<item value="LoRa_getMode"/>
+		<item value="RXCONT_MODE"/>
+		<item value="handle_req_data"/>
+		<item value="TX"/>
+		<item value="PKT_ACK"/>
+		<item value="LoRa_StartPollingnode"/>
+		<item value="printu"/>
+		<item value="LoRa_startReceiving(&amp;myLoRa);"/>
+		<item value="wait_for_ack"/>
+		<item value="PKT_REQ_ADDRESS"/>
+		<item value="req_Registration"/>
+		<item value="sendMeshPacket"/>
+		<item value="REQ_ADDRESS"/>
+		<item value="handleIncomingData"/>
+		<item value="rx"/>
+	</list>
+	<list key="replacehistory">
+		<item value="LoRa_gotoMode"/>
+		<item value="RXCONTIN_MODE"/>
+	</list>
+	<section name="org.eclipse.ui.texteditor.FindReplaceDialog">
+		<item key="wrap" value="true"/>
+		<item key="casesensitive" value="true"/>
+		<item key="wholeword" value="false"/>
+		<item key="incremental" value="false"/>
+		<item key="isRegEx" value="false"/>
+		<item key="selection" value="RXCONT_MODE"/>
+		<list key="findhistory">
+			<item value="RXCONT_MODE"/>
+		</list>
+		<list key="replacehistory">
+		</list>
+	</section>
+	<section name="org.eclipse.ui.texteditor.FindReplaceDialog_dialogBounds">
+		<item key="DIALOG_X_ORIGIN" value="762"/>
+		<item key="DIALOG_Y_ORIGIN" value="247"/>
+		<item key="DIALOG_WIDTH" value="414"/>
+		<item key="DIALOG_HEIGHT" value="454"/>
+		<item key="DIALOG_FONT_NAME" value="1|Segoe UI|9.0|0|WINDOWS|1|-15|0|0|0|400|0|0|0|1|0|0|0|0|Segoe UI"/>
+	</section>
+</section>

@@ -1,0 +1,1096 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body (clean RX model)
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "spi.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include "LoRa.h"
+#include <stdint.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include "stm32f1xx.h"
+#include "stm32f1xx_hal_flash.h"
+#include "stm32f1xx_hal_flash_ex.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+#define FLASH_STORAGE_START  0x0800FC00  // Last 1KB of flash
+#define FLASH_MAGIC_NUMBER   0x55AA1234
+
+#define MESH_VERSION          0x01
+#define PKT_REQ_ADDRESS       0x01
+#define PKT_ACK_ADDRESS       0x02
+#define PKT_REQ_DATA          0x03
+#define PKT_SENSOR_DATA       0x04
+#define PKT_ACK               0x05
+
+#define DUP_CACHE_SIZE        16
+#define DBG_BUF_SIZE          128
+
+#define USE_UART
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;          // Validation magic number
+    uint32_t counter;        // Persistent counter (we store node id here)
+    uint32_t device_id;      // Persistent device ID
+    uint32_t checksum;       // Simple checksum
+} stored_data_t;
+
+typedef struct __attribute__((packed)) {
+  uint8_t  version;
+  uint8_t  type;
+  uint8_t  src;
+  uint8_t  dest;
+  uint8_t  ttl;
+  uint8_t  flags;
+  uint16_t msg_id;
+  uint8_t payload_len;
+} MeshHeader;
+
+typedef struct {
+  uint8_t src;
+  uint16_t msg_id;
+} SeenPacket;
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN PV */
+LoRa myLoRa;
+uint16_t LoRa_status;
+uint32_t uid[3];
+uint8_t Master = 1;
+int nodeId = 0;
+float dp = 1;
+float t_in = 2;
+float t_out = 3;
+float p_header = 4;
+float pm = 5;
+uint8_t cleaning = 0;
+static uint32_t lcg_seed = 0;
+
+uint8_t rxBuf[256];
+uint8_t txBuf[256];
+char payloadBuf[128];
+SeenPacket seenPackets[DUP_CACHE_SIZE];
+uint8_t seenIndex = 0;
+
+/* Watchdog variables */
+uint32_t lastActivityTime = 0;
+uint32_t watchdogTimeout = 30000; // 30 seconds
+
+/* Debug buffer */
+static char dbg_buf[DBG_BUF_SIZE];
+
+/* Radio health tracking */
+uint8_t radioErrorCount = 0;
+uint32_t lastResetTime = 0;
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
+void flash_erase_node_page(void);
+uint8_t flash_read_node_id(void);
+void flash_save_node_id(uint8_t node_id);
+uint32_t calculate_checksum(uint32_t counter, uint32_t device_id);
+#ifdef USE_UART
+	void printu(const char *msg);
+	void print_dbg(const char *format, ...);
+	void print_node_id(uint8_t nodeId);
+	void print_reset_reason(void);
+#endif
+void STM32_GetUID(uint32_t uid[3]);
+void req_Registration(void);
+uint8_t wait_for_ack(uint16_t timeout_ms);
+uint8_t LoRa_Transmit(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id);
+void LoRa_StartPollingnode(void);
+void handle_req_data(uint8_t src_id, uint16_t msg_id);
+void flash_clear_storage(void);
+void check_clear_button(void);
+uint8_t isDuplicate(uint8_t src, uint16_t msg_id);
+void rememberPacket(uint8_t src, uint16_t msg_id);
+uint8_t parse_REQ_DATA(const char *rx, uint8_t *dst, uint8_t *src);
+void check_radio_health(void);
+void reset_watchdog(void);
+void check_watchdog(void);
+void hard_reset_radio(void);
+uint8_t check_radio_status(void);
+uint8_t wait_for_tx_complete(void);
+
+static uint32_t lcg_rand(void);
+static float rand_range(float min, float max);
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+  HAL_Init();
+
+  lcg_seed = HAL_GetTick();
+
+  /* USER CODE BEGIN Init */
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE END Init */
+
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+  /* USER CODE END SysInit */
+
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+
+  /* USER CODE BEGIN 2 */
+#ifdef USE_UART
+    printu("\r\n\r\n=== SYSTEM START ===\r\n");
+#endif
+    /* ---------- SX127x RESET ---------- */
+    hard_reset_radio();
+    HAL_Delay(100);
+
+    /* ---------- INIT LoRa STRUCT ---------- */
+    myLoRa = newLoRa();
+    myLoRa.CS_port    = NSS_GPIO_Port;
+    myLoRa.CS_pin     = NSS_Pin;
+    myLoRa.reset_port = RESET_GPIO_Port;
+    myLoRa.reset_pin  = RESET_Pin;
+    myLoRa.DIO0_port  = DIO0_GPIO_Port;
+    myLoRa.DIO0_pin   = DIO0_Pin;
+    myLoRa.hSPIx      = &hspi1;
+
+    LoRa_status = LoRa_init(&myLoRa);
+
+    if (LoRa_status != LORA_OK)
+    {
+#ifdef USE_UART
+      printu("LoRa init failed. Retrying...\r\n");
+#endif
+      hard_reset_radio();
+      HAL_Delay(100);
+
+      LoRa_status = LoRa_init(&myLoRa);
+      if (LoRa_status != LORA_OK) {
+#ifdef USE_UART
+          printu("LoRa init failed permanently.\r\n");
+#endif
+          while (1) {
+              check_clear_button();
+              HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);  // Blink LED to indicate error
+              HAL_Delay(500);
+          }
+      }
+    }
+
+    // Configure LoRa parameters to match ESP32 master
+    LoRa_setSyncWord(&myLoRa, 0x34);
+    LoRa_setSpreadingFactor(&myLoRa, 7);
+    LoRa_enableCRC(&myLoRa, 1);
+
+    /* ---------- SAFE FIFO SETUP ---------- */
+    LoRa_write(&myLoRa, RegFiFoRxBaseAddr, 0x00);
+    LoRa_write(&myLoRa, RegFiFoTxBaseAddr, 0x80);
+
+    /* ---------- START RX (single start) ---------- */
+    LoRa_startReceiving(&myLoRa);
+
+#ifdef USE_UART
+    printu("✅ LoRa initialized\r\n");
+#endif
+
+    // Verify radio configuration
+    uint8_t version = LoRa_read(&myLoRa, RegVersion);
+#ifdef USE_UART
+    print_dbg("Radio Version: 0x%02X\r\n", version);
+#endif
+
+    STM32_GetUID(uid);
+#ifdef USE_UART
+    print_dbg("UID: %08lX-%08lX-%08lX\r\n", uid[0], uid[1], uid[2]);
+#endif
+
+    uint8_t saved_node_id = flash_read_node_id();
+    if (saved_node_id != 0xFF) {  // 0xFF means invalid/uninitialized
+        nodeId = saved_node_id;
+#ifdef USE_UART
+        print_node_id(nodeId);
+#endif
+    } else {
+#ifdef USE_UART
+        printu("No valid Node ID in flash\r\n");
+#endif
+    }
+
+    reset_watchdog();
+    lastResetTime = HAL_GetTick();
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  while (1)
+  {
+      check_clear_button();
+      check_watchdog();
+
+      if(nodeId > 0)
+      {
+          reset_watchdog();
+          LoRa_StartPollingnode();
+      }
+      else
+      {
+          req_Registration();
+      }
+
+      check_radio_health();
+      HAL_Delay(100); // Increased from 10ms to reduce radio mode switching
+  }
+}
+
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* USER CODE BEGIN 4 */
+#ifdef USE_UART
+void printu(const char *msg)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 200);
+}
+
+void print_dbg(const char *format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    int len = vsnprintf(dbg_buf, DBG_BUF_SIZE, format, args);
+    va_end(args);
+
+    if (len > 0) {
+        printu(dbg_buf);
+    }
+}
+
+void print_node_id(uint8_t nodeId)
+{
+    char buf[4];   // only 4 bytes on stack
+    buf[0] = '0' + (nodeId / 10);
+    buf[1] = '0' + (nodeId % 10);
+    buf[2] = '\r';
+    buf[3] = '\n';
+
+    printu("Node ID: ");
+    printu(buf);
+}
+
+void print_reset_reason(void)
+{
+    uint32_t flags = RCC->CSR;
+    if(flags & RCC_CSR_LPWRRSTF) {
+        printu("Reset Reason: Low Power (Brown-out)\r\n");
+    } else if(flags & RCC_CSR_WWDGRSTF) {
+        printu("Reset Reason: Window Watchdog\r\n");
+    } else if(flags & RCC_CSR_IWDGRSTF) {
+        printu("Reset Reason: Independent Watchdog\r\n");
+    } else if(flags & RCC_CSR_SFTRSTF) {
+        printu("Reset Reason: Software Reset\r\n");
+    } else if(flags & RCC_CSR_PORRSTF) {
+        printu("Reset Reason: Power-on Reset\r\n");
+    } else if(flags & RCC_CSR_PINRSTF) {
+        printu("Reset Reason: External Pin Reset\r\n");
+    } else {
+        printu("Reset Reason: Unknown\r\n");
+    }
+    RCC->CSR |= RCC_CSR_RMVF;
+}
+#endif
+
+void STM32_GetUID(uint32_t uid_out[3])
+{
+    uid_out[0] = *(uint32_t*)0x1FFFF7E8;
+    uid_out[1] = *(uint32_t*)0x1FFFF7EC;
+    uid_out[2] = *(uint32_t*)0x1FFFF7F0;
+}
+
+void reset_watchdog(void) {
+    lastActivityTime = HAL_GetTick();
+}
+
+void check_watchdog(void) {
+    if (HAL_GetTick() - lastActivityTime > watchdogTimeout) {
+#ifdef USE_UART
+        printu("🔄 Watchdog timeout - Resetting system\r\n");
+#endif
+        for (int i = 0; i < 5; i++) {
+            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);
+            HAL_Delay(100);
+        }
+        NVIC_SystemReset();
+    }
+}
+
+void hard_reset_radio(void) {
+#ifdef USE_UART
+    printu("Resetting radio...\r\n");
+#endif
+    // Hard reset the radio
+    HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_RESET);
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+
+    // Ensure NSS is high
+    HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_SET);
+    HAL_Delay(10);
+
+    radioErrorCount = 0;
+    lastResetTime = HAL_GetTick();
+}
+
+void check_radio_health(void) {
+    static uint32_t lastCheck = 0;
+
+    if (HAL_GetTick() - lastCheck > 5000) {
+        uint8_t version = LoRa_read(&myLoRa, RegVersion);
+        if (version != 0x12) {
+#ifdef USE_UART
+            print_dbg("⚠️ Radio version mismatch: 0x%02X\r\n", version);
+#endif
+            // Only reset if we've had multiple errors
+            if (radioErrorCount++ > 3) {
+                hard_reset_radio();
+                HAL_Delay(100);
+                LoRa_init(&myLoRa);
+                LoRa_setSyncWord(&myLoRa, 0x34);
+                LoRa_setSpreadingFactor(&myLoRa, 7);
+                LoRa_enableCRC(&myLoRa, 1);
+                LoRa_startReceiving(&myLoRa);
+            }
+        } else {
+            radioErrorCount = 0; // Reset error count on success
+        }
+        lastCheck = HAL_GetTick();
+    }
+}
+
+uint8_t check_radio_status(void) {
+    // Check if radio is responding
+    uint8_t version = LoRa_read(&myLoRa, RegVersion);
+    if (version != 0x12) {
+#ifdef USE_UART
+        print_dbg("Radio version wrong: 0x%02X\r\n", version);
+#endif
+        return 0;
+    }
+
+    // Check if in a valid mode
+    uint8_t op_mode = LoRa_read(&myLoRa, RegOpMode);
+    uint8_t mode = op_mode & 0x07;
+
+    // Mode should be 0x01 (STDBY), 0x03 (TX), or 0x05 (RX continuous)
+    if (mode != 0x01 && mode != 0x03 && mode != 0x05) {
+#ifdef USE_UART
+        print_dbg("Radio in wrong mode: 0x%02X\r\n", mode);
+#endif
+        return 0;
+    }
+
+    return 1;
+}
+
+uint8_t wait_for_tx_complete(void) {
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < 1000) { // 1 second timeout
+        uint8_t irq_flags = LoRa_read(&myLoRa, RegIrqFlags);
+        if (irq_flags & 0x08) { // TxDone flag
+            LoRa_write(&myLoRa, RegIrqFlags, 0xFF); // Clear all IRQ flags
+            return 1;
+        }
+        HAL_Delay(1);
+    }
+#ifdef USE_UART
+    printu("❌ TX timeout\r\n");
+#endif
+    return 0;
+}
+
+/* ---------------- Registration with MeshHeader -------------- */
+void req_Registration(void)
+{
+    static uint32_t lastRegistrationAttempt = 0;
+
+    // Don't try too often
+    if (HAL_GetTick() - lastRegistrationAttempt < 5000) {
+        return;
+    }
+
+    lastRegistrationAttempt = HAL_GetTick();
+
+    // Create UID string payload
+    snprintf(payloadBuf, sizeof(payloadBuf),
+             "%08lX-%08lX-%08lX",
+             uid[0], uid[1], uid[2]);
+
+#ifdef USE_UART
+    printu("📤 Sending registration request...\r\n");
+#endif
+
+    // Send registration request with MeshHeader
+    uint16_t msg_id = lcg_rand() & 0xFFFF;
+    uint8_t result = LoRa_Transmit(PKT_REQ_ADDRESS, 0xFF, 0, payloadBuf, msg_id);
+
+    if (result) {
+#ifdef USE_UART
+        printu("✅ Registration request sent\r\n");
+#endif
+        // Wait for ACK with MeshHeader
+        uint8_t ack = wait_for_ack(3000);
+        if (ack != 0xFF) {
+            return;
+        }
+    }
+    else
+    {
+#ifdef USE_UART
+        printu("❌ Registration request failed\r\n");
+#endif
+    }
+}
+
+/* ---------------- Wait for ACK with MeshHeader ---------------- */
+uint8_t wait_for_ack(uint16_t timeout_ms)
+{
+#ifdef USE_UART
+    printu("⌛ Waiting for ACK...\r\n");
+#endif
+    uint32_t start = HAL_GetTick();
+
+    while ((HAL_GetTick() - start) < timeout_ms)
+    {
+        uint8_t len = LoRa_receive(&myLoRa, rxBuf, sizeof(rxBuf) - 1);
+        if (len > 0)
+        {
+            // Check if we have enough bytes for a header
+            if (len < sizeof(MeshHeader)) {
+                continue;
+            }
+
+            MeshHeader *hdr = (MeshHeader *)rxBuf;
+
+            // Check version
+            if (hdr->version != MESH_VERSION) {
+                continue;
+            }
+
+            // Check packet type
+            if (hdr->type != PKT_ACK_ADDRESS) {
+                continue;  // Not an ACK_ADDRESS packet
+            }
+
+            // Check duplicate
+            if (isDuplicate(hdr->src, hdr->msg_id)) {
+                continue;
+            }
+
+            // Remember this packet
+            rememberPacket(hdr->src, hdr->msg_id);
+
+            // Extract payload (starts after header)
+            uint8_t payloadStart = sizeof(MeshHeader);
+            uint8_t payloadLen = hdr->payload_len;
+
+            if (payloadLen > (len - payloadStart)) {
+                payloadLen = len - payloadStart;
+            }
+
+            if (payloadLen > 0) {
+                memcpy(payloadBuf, &rxBuf[payloadStart], payloadLen);
+                payloadBuf[payloadLen] = '\0';
+            } else {
+                payloadBuf[0] = '\0';
+            }
+
+#ifdef USE_UART
+            printu("📥 Received ACK_ADDRESS packet\r\n");
+#endif
+
+            // Parse payload: format is "UID|nodeId"
+            uint32_t r_uid0 = 0, r_uid1 = 0, r_uid2 = 0;
+            unsigned int assignedId = 0;
+
+            int parsed = sscanf(payloadBuf,
+                                "%08lX-%08lX-%08lX|%u",
+                                &r_uid0, &r_uid1, &r_uid2,
+                                &assignedId);
+
+            if (parsed == 4)
+            {
+                if (r_uid0 == uid[0] && r_uid1 == uid[1] && r_uid2 == uid[2])
+                {
+                    nodeId = (int)assignedId;
+#ifdef USE_UART
+                    print_dbg("✅ Node ID assigned: %02d\r\n", nodeId);
+#endif
+                    // Send ACK back to confirm
+                    LoRa_Transmit(PKT_ACK, Master, nodeId, "", hdr->msg_id);
+
+                    if (nodeId > 0) {
+                        flash_save_node_id(nodeId);
+#ifdef USE_UART
+                        printu("Node ID saved to flash\r\n");
+#endif
+                    }
+                    return (uint8_t)nodeId;
+                } else {
+#ifdef USE_UART
+                    printu("❌ UID mismatch in ACK\r\n");
+#endif
+                }
+            } else {
+#ifdef USE_UART
+                printu("❌ ACK parse failed\r\n");
+#endif
+            }
+        }
+        HAL_Delay(2);
+    }
+
+#ifdef USE_UART
+    printu("⏱️ Timeout waiting for ACK\r\n");
+#endif
+    return 0xFF;
+}
+
+/* -------------- Transmit with MeshHeader - Improved Version ------------- */
+uint8_t LoRa_Transmit(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id)
+{
+    MeshHeader hdr;
+    uint8_t payload_len = payload ? strlen(payload) : 0;
+    uint16_t total_len = sizeof(MeshHeader) + payload_len;
+
+    // Validate length
+    if (total_len > sizeof(txBuf)) {
+#ifdef USE_UART
+        printu("❌ TX error: Packet too large\r\n");
+#endif
+        return 0;
+    }
+
+    // Build header
+    hdr.version = MESH_VERSION;
+    hdr.type = type;
+    hdr.src = src;
+    hdr.dest = dst;
+    hdr.ttl = 5;
+    hdr.flags = 0;
+    hdr.msg_id = msg_id;
+    hdr.payload_len = payload_len;
+
+    // Build complete packet
+    memcpy(txBuf, &hdr, sizeof(MeshHeader));
+    if (payload_len > 0) {
+        memcpy(txBuf + sizeof(MeshHeader), payload, payload_len);
+    }
+
+    // Check radio status before attempting transmission
+    if (!check_radio_status()) {
+#ifdef USE_UART
+        printu("⚠️ Radio not ready, resetting...\r\n");
+#endif
+        hard_reset_radio();
+        HAL_Delay(100);
+        LoRa_init(&myLoRa);
+        LoRa_setSyncWord(&myLoRa, 0x34);
+        LoRa_setSpreadingFactor(&myLoRa, 7);
+        LoRa_startReceiving(&myLoRa);
+        HAL_Delay(100);
+
+        // Check again
+        if (!check_radio_status()) {
+#ifdef USE_UART
+            printu("❌ Radio still not ready after reset\r\n");
+#endif
+            return 0;
+        }
+    }
+
+    // Ensure radio is in standby mode for TX
+    LoRa_gotoMode(&myLoRa, STNBY_MODE);
+    HAL_Delay(50);
+
+    // Clear any pending IRQ flags
+    LoRa_write(&myLoRa, RegIrqFlags, 0xFF);
+
+    // Print debug info
+#ifdef USE_UART
+    print_dbg("📤 TX: type=%d, dst=%d, src=%d, msg_id=%d, len=%d\r\n",
+              type, dst, src, msg_id, total_len);
+
+    if (payload_len > 0 && payload_len < 50) {
+        print_dbg("    Payload: %s\r\n", payload);
+    }
+#endif
+
+    // Transmit with timeout
+    uint16_t tx_result = LoRa_transmit(&myLoRa, txBuf, total_len, 2000);
+
+    if (tx_result == 1) {
+        // Wait for TxDone
+        if (wait_for_tx_complete()) {
+#ifdef USE_UART
+            printu("✅ TX successful\r\n");
+#endif
+            radioErrorCount = 0; // Reset error count on success
+
+            // Return to RX mode
+            LoRa_startReceiving(&myLoRa);
+            HAL_Delay(10);
+            return 1;
+        } else {
+#ifdef USE_UART
+            printu("❌ TX did not complete\r\n");
+#endif
+            tx_result = 0;
+        }
+    }
+
+    if (tx_result == 0) {
+#ifdef USE_UART
+        printu("❌ TX failed\r\n");
+#endif
+        radioErrorCount++;
+
+        // If we have multiple consecutive errors, hard reset
+        if (radioErrorCount > 5) {
+#ifdef USE_UART
+            printu("⚠️ Multiple TX failures, resetting radio...\r\n");
+#endif
+            hard_reset_radio();
+            HAL_Delay(100);
+            LoRa_init(&myLoRa);
+            LoRa_setSyncWord(&myLoRa, 0x34);
+            LoRa_setSpreadingFactor(&myLoRa, 7);
+            LoRa_startReceiving(&myLoRa);
+        } else {
+            // Soft recovery: restart RX mode
+            LoRa_startReceiving(&myLoRa);
+        }
+    }
+    return 0;
+}
+
+/* ---------- Main polling function with MeshHeader ---------- */
+void LoRa_StartPollingnode(void)
+{
+    uint8_t len;
+    static uint32_t lastModeCheck = 0;
+
+    if (nodeId == 0)
+        return;
+
+    // Periodically check radio mode (less frequently)
+    if (HAL_GetTick() - lastModeCheck > 10000) { // Every 10 seconds
+        uint8_t op_mode = LoRa_read(&myLoRa, RegOpMode);
+        uint8_t current_mode = op_mode & 0x07;
+
+        if (current_mode != 0x05) { // Not in receive continuous mode
+#ifdef USE_UART
+            printu("🔄 Restarting RX mode\r\n");
+#endif
+            LoRa_startReceiving(&myLoRa);
+        }
+        lastModeCheck = HAL_GetTick();
+    }
+
+    len = LoRa_receive(&myLoRa, rxBuf, sizeof(rxBuf) - 1);
+
+    if (len > 0)
+    {
+        reset_watchdog(); // Reset watchdog on activity
+
+        // Check if we have enough bytes for a header
+        if (len < sizeof(MeshHeader)) {
+            return;
+        }
+
+        MeshHeader *hdr = (MeshHeader *)rxBuf;
+
+        // Check version
+        if (hdr->version != MESH_VERSION) {
+            return;
+        }
+
+        // Check if packet is for us (or broadcast 0xFF)
+        if (hdr->dest != nodeId && hdr->dest != 0xFF) {
+            return;
+        }
+
+        // Check duplicate
+        if (isDuplicate(hdr->src, hdr->msg_id)) {
+            return;
+        }
+
+        // Remember this packet
+        rememberPacket(hdr->src, hdr->msg_id);
+
+        // Extract payload
+        uint8_t payloadStart = sizeof(MeshHeader);
+        uint8_t payloadLen = hdr->payload_len;
+
+        if (payloadLen > (len - payloadStart)) {
+            payloadLen = len - payloadStart;
+        }
+
+        if (payloadLen > 0) {
+            memcpy(payloadBuf, &rxBuf[payloadStart], payloadLen);
+            payloadBuf[payloadLen] = '\0';
+        } else {
+            payloadBuf[0] = '\0';
+        }
+
+#ifdef USE_UART
+        print_dbg("📥 RX: type=%d, src=%d, dst=%d, msg_id=%d\r\n",
+                hdr->type, hdr->src, hdr->dest, hdr->msg_id);
+
+        if (payloadLen > 0 && payloadLen < 100) {
+            print_dbg("    Payload: %s\r\n", payloadBuf);
+        }
+#endif
+
+        switch (hdr->type) {
+            case PKT_REQ_DATA:
+#ifdef USE_UART
+                printu("✅ REQ_DATA received\r\n");
+#endif
+                // Send ACK immediately
+                LoRa_Transmit(PKT_ACK, hdr->src, nodeId, "", hdr->msg_id);
+
+                // Small delay before sending data
+                HAL_Delay(50);
+
+                // Send sensor data
+                handle_req_data(hdr->src, hdr->msg_id); // Use the same msg_id for response
+                break;
+
+            case PKT_ACK:
+#ifdef USE_UART
+                printu("✅ ACK received\r\n");
+#endif
+                // RSSI reading
+                if (len >= sizeof(MeshHeader)) {
+                    int8_t rssi = LoRa_getRSSI(&myLoRa);
+#ifdef USE_UART
+                    print_dbg("    RSSI: %d dBm\r\n", rssi);
+#endif
+                }
+                break;
+
+            default:
+                break;
+        }
+
+        // Only print RSSI for non-ACK packets
+        if (hdr->type != PKT_ACK && len >= sizeof(MeshHeader)) {
+            int8_t rssi = LoRa_getRSSI(&myLoRa);
+#ifdef USE_UART
+            print_dbg("    RSSI: %d dBm\r\n", rssi);
+#endif
+        }
+    }
+}
+
+/* ---------- Handle REQ_DATA with MeshHeader ---------- */
+void handle_req_data(uint8_t src_id, uint16_t msg_id)
+{
+    // Generate random sensor values
+    dp       = rand_range(1200.0f, 1300.0f);
+    t_in     = rand_range(10.0f, 20.0f);
+    t_out    = rand_range(170.0f, 190.0f);
+    p_header = rand_range(55.0f, 65.0f);
+    pm       = rand_range(10.0f, 15.0f);
+    cleaning = (lcg_rand() % 2) ? 1 : 0;
+
+    // Format sensor data
+    snprintf(payloadBuf, sizeof(payloadBuf),
+             "%.1f,%.1f,%.1f,%.1f,%.1f,%d",
+             dp, t_in, t_out, p_header, pm, cleaning);
+
+    // Send sensor data with MeshHeader - using the SAME msg_id as the request
+    LoRa_Transmit(PKT_SENSOR_DATA, src_id, nodeId, payloadBuf, msg_id);
+}
+
+/* ==================== FLASH STORAGE FOR NODE ID ==================== */
+
+void flash_erase_node_page(void) {
+    HAL_FLASH_Unlock();
+
+    FLASH_EraseInitTypeDef erase = {0};
+    erase.TypeErase = FLASH_TYPEERASE_PAGES;
+    erase.PageAddress = FLASH_STORAGE_START;
+    erase.NbPages = 1;  // 1KB page for F103
+
+    uint32_t page_error = 0;
+    HAL_FLASHEx_Erase(&erase, &page_error);
+
+    HAL_FLASH_Lock();
+}
+
+uint8_t flash_read_node_id(void) {
+    stored_data_t* data = (stored_data_t*)FLASH_STORAGE_START;
+
+    if (data->magic == FLASH_MAGIC_NUMBER &&
+        data->checksum == calculate_checksum(data->counter, data->device_id)) {
+
+        if (data->counter <= 99 && data->counter != 0) {
+            return (uint8_t)data->counter;
+        }
+    }
+    return 0xFF;  // Invalid or no data
+}
+
+void flash_save_node_id(uint8_t node_id) {
+    stored_data_t data;
+
+    uint32_t device_id = (uid[0] ^ uid[1] ^ uid[2]) & 0x00FFFFFF;
+
+    data.magic = FLASH_MAGIC_NUMBER;
+    data.counter = node_id;           // Store node ID in counter field
+    data.device_id = device_id;       // Store device ID
+    data.checksum = calculate_checksum(data.counter, data.device_id);
+
+    flash_erase_node_page();
+
+    HAL_FLASH_Unlock();
+
+    uint8_t* data_ptr = (uint8_t*)&data;
+    for (uint32_t i = 0; i < sizeof(data); i += 4) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                         FLASH_STORAGE_START + i,
+                         *(uint32_t*)(data_ptr + i));
+    }
+
+    HAL_FLASH_Lock();
+
+    uint8_t verify_id = flash_read_node_id();
+    if (verify_id != node_id) {
+#ifdef USE_UART
+        printu("Flash write verification failed!\r\n");
+#endif
+    } else {
+#ifdef USE_UART
+        print_dbg("Node ID %02d saved\r\n", node_id);
+#endif
+    }
+}
+
+uint32_t calculate_checksum(uint32_t counter, uint32_t device_id) {
+    return counter ^ device_id ^ 0xDEADBEEF;
+}
+
+void flash_clear_storage(void) {
+#ifdef USE_UART
+    printu("\r\n=== CLEARING FLASH STORAGE ===\r\n");
+#endif
+
+    flash_erase_node_page();
+
+    nodeId = 0;
+
+#ifdef USE_UART
+    printu("✓ Flash storage cleared\r\n");
+    printu("✓ Node ID reset to 00\r\n");
+    printu("=== Device will restart registration ===\r\n\r\n");
+#endif
+
+    for(int i = 0; i < 5; i++) {
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);
+        HAL_Delay(200);
+    }
+}
+
+void check_clear_button(void) {
+    static uint32_t press_start_time = 0;
+    static uint8_t is_clearing = 0;
+
+    if (HAL_GPIO_ReadPin(Erase_GPIO_Port, Erase_Pin) == GPIO_PIN_RESET) {
+        if (press_start_time == 0) {
+            press_start_time = HAL_GetTick();
+#ifdef USE_UART
+            printu("[Button pressed - hold for 3s to clear]\r\n");
+#endif
+        }
+        else if (!is_clearing && (HAL_GetTick() - press_start_time) > 3000) {
+            is_clearing = 1;
+            flash_clear_storage();
+            while (HAL_GPIO_ReadPin(Erase_GPIO_Port, Erase_Pin) == GPIO_PIN_RESET) {
+                HAL_Delay(10);
+            }
+            is_clearing = 0;
+        }
+    }
+    else {
+        if (press_start_time != 0 && !is_clearing) {
+            uint32_t press_duration = HAL_GetTick() - press_start_time;
+            if (press_duration < 3000) {
+#ifdef USE_UART
+                print_dbg("[Button released after %lums]\r\n", press_duration);
+#endif
+            }
+        }
+        press_start_time = 0;
+    }
+}
+
+/* ---------- Simple REQ_DATA parser used by RX polling ---------- */
+uint8_t parse_REQ_DATA(const char *rx, uint8_t *dst, uint8_t *src)
+{
+    if (strstr(rx, "REQ_DATA") == NULL)
+        return 0;
+
+    if (!(rx[0] >= '0' && rx[0] <= '9' &&
+          rx[1] >= '0' && rx[1] <= '9'))
+        return 0;
+
+    *dst = (rx[0] - '0') * 10 + (rx[1] - '0');
+
+    const char *p = strchr(rx, '|');
+    if (!p) return 0;
+
+    p++;
+    while (*p == ' ') p++;
+
+    if (!(p[0] >= '0' && p[0] <= '9' &&
+          p[1] >= '0' && p[1] <= '9'))
+        return 0;
+
+    *src = (p[0] - '0') * 10 + (p[1] - '0');
+
+    return 1;
+}
+
+/* ---------- Duplicate Suppression ---------- */
+uint8_t isDuplicate(uint8_t src, uint16_t msg_id)
+{
+  for (uint8_t i = 0; i < DUP_CACHE_SIZE; i++)
+  {
+    if (seenPackets[i].src == src &&
+        seenPackets[i].msg_id == msg_id)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void rememberPacket(uint8_t src, uint16_t msg_id)
+{
+  seenPackets[seenIndex].src = src;
+  seenPackets[seenIndex].msg_id = msg_id;
+
+  seenIndex++;
+  if (seenIndex >= DUP_CACHE_SIZE)
+    seenIndex = 0;
+}
+
+static uint32_t lcg_rand(void)
+{
+    lcg_seed = (1103515245 * lcg_seed + 12345);
+    return (lcg_seed >> 16) & 0x7FFF;
+}
+
+static float rand_range(float min, float max)
+{
+    return min + ((float)lcg_rand() / 32767.0f) * (max - min);
+}
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1)
+  {
+  }
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif /* USE_FULL_ASSERT */
