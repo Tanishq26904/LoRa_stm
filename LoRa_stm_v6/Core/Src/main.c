@@ -132,6 +132,7 @@ uint32_t calculate_checksum(uint32_t counter, uint32_t device_id);
 void STM32_GetUID(uint32_t uid[3]);
 void req_Registration(void);
 uint8_t wait_for_ack(uint16_t timeout_ms);
+uint8_t LoRa_Transmit_ack(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id);
 uint8_t LoRa_Transmit(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id);
 void LoRa_StartPollingnode(void);
 void handle_req_data(uint8_t src_id, uint16_t msg_id);
@@ -487,55 +488,48 @@ uint8_t wait_for_tx_complete(void) {
     return 0;
 }
 
+
 /* ---------------- Registration with MeshHeader -------------- */
 void req_Registration(void)
 {
-    static uint32_t lastRegistrationAttempt = 0;
-
-    // Don't try too often
-    if (HAL_GetTick() - lastRegistrationAttempt < 5000) {
-        return;
-    }
-
-    lastRegistrationAttempt = HAL_GetTick();
-
     // Create UID string payload
     snprintf(payloadBuf, sizeof(payloadBuf),
              "%08lX-%08lX-%08lX",
              uid[0], uid[1], uid[2]);
 
-#ifdef USE_UART
-    printu("📤 Sending registration request...\r\n");
-#endif
+    // Go to standby before CAD/TX
+    LoRa_gotoMode(&myLoRa, STNBY_MODE);
+    HAL_Delay(2);
 
-    // Send registration request with MeshHeader
-    uint16_t msg_id = lcg_rand() & 0xFFFF;
-    uint8_t result = LoRa_Transmit(PKT_REQ_ADDRESS, 0xFF, 0, payloadBuf, msg_id);
+    // Optional CAD check
+    uint8_t cadResult = LoRa_performCAD(&myLoRa, 100);
+    if(cadResult == 0)
+    {
+        // Send registration request with MeshHeader
+    	LoRa_Transmit_ack(PKT_REQ_ADDRESS, 0xFF, 0, payloadBuf, lcg_rand() & 0xFFFF);
+        printu("📤 Sent registration request with MeshHeader\r\n");
 
-    if (result) {
-#ifdef USE_UART
-        printu("✅ Registration request sent\r\n");
-#endif
+        // Return to RX mode
+        LoRa_startReceiving(&myLoRa);
+
         // Wait for ACK with MeshHeader
-        uint8_t ack = wait_for_ack(3000);
+        uint8_t ack = wait_for_ack(5000);
+
         if (ack != 0xFF) {
             return;
         }
     }
     else
     {
-#ifdef USE_UART
-        printu("❌ Registration request failed\r\n");
-#endif
+        printu("Skipped registration, channel busy\r\n");
+        LoRa_startReceiving(&myLoRa);
     }
 }
 
 /* ---------------- Wait for ACK with MeshHeader ---------------- */
 uint8_t wait_for_ack(uint16_t timeout_ms)
 {
-#ifdef USE_UART
     printu("⌛ Waiting for ACK...\r\n");
-#endif
     uint32_t start = HAL_GetTick();
 
     while ((HAL_GetTick() - start) < timeout_ms)
@@ -552,6 +546,7 @@ uint8_t wait_for_ack(uint16_t timeout_ms)
 
             // Check version
             if (hdr->version != MESH_VERSION) {
+                printu("❌ Wrong protocol version\r\n");
                 continue;
             }
 
@@ -562,6 +557,7 @@ uint8_t wait_for_ack(uint16_t timeout_ms)
 
             // Check duplicate
             if (isDuplicate(hdr->src, hdr->msg_id)) {
+                printu("🛑 Duplicate packet\r\n");
                 continue;
             }
 
@@ -583,9 +579,7 @@ uint8_t wait_for_ack(uint16_t timeout_ms)
                 payloadBuf[0] = '\0';
             }
 
-#ifdef USE_UART
             printu("📥 Received ACK_ADDRESS packet\r\n");
-#endif
 
             // Parse payload: format is "UID|nodeId"
             uint32_t r_uid0 = 0, r_uid1 = 0, r_uid2 = 0;
@@ -601,40 +595,78 @@ uint8_t wait_for_ack(uint16_t timeout_ms)
                 if (r_uid0 == uid[0] && r_uid1 == uid[1] && r_uid2 == uid[2])
                 {
                     nodeId = (int)assignedId;
-#ifdef USE_UART
-                    print_dbg("✅ Node ID assigned: %02d\r\n", nodeId);
-#endif
+                    char msg[50];
+                    sprintf(msg, "✅ Node ID assigned: %02d\r\n", nodeId);
+                    printu(msg);
+
                     // Send ACK back to confirm
-                    LoRa_Transmit(PKT_ACK, Master, nodeId, "", hdr->msg_id);
+                    LoRa_Transmit_ack(PKT_ACK, Master, nodeId, "", hdr->msg_id);
 
                     if (nodeId > 0) {
-                        flash_save_node_id(nodeId);
-#ifdef USE_UART
+                        //flash_save_node_id(nodeId);
                         printu("Node ID saved to flash\r\n");
-#endif
                     }
+
                     return (uint8_t)nodeId;
                 } else {
-#ifdef USE_UART
                     printu("❌ UID mismatch in ACK\r\n");
-#endif
                 }
             } else {
-#ifdef USE_UART
                 printu("❌ ACK parse failed\r\n");
-#endif
             }
         }
         HAL_Delay(2);
     }
 
-#ifdef USE_UART
     printu("⏱️ Timeout waiting for ACK\r\n");
-#endif
     return 0xFF;
 }
 
-/* -------------- Transmit with MeshHeader - Improved Version ------------- */
+/* -------------- Transmit with MeshHeader ------------- */
+uint8_t LoRa_Transmit_ack(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id)
+{
+    MeshHeader hdr;
+    uint8_t payload_len = payload ? strlen(payload) : 0;
+    uint16_t total_len = sizeof(MeshHeader) + payload_len;
+
+    hdr.version = MESH_VERSION;
+    hdr.type = type;
+    hdr.src = src;
+    hdr.dest = dst;
+    hdr.ttl = 5;
+    hdr.flags = 0;
+    hdr.msg_id = msg_id;
+    hdr.payload_len = payload_len;
+
+    // Ensure radio in standby before TX
+    LoRa_gotoMode(&myLoRa, STNBY_MODE);
+    HAL_Delay(2);
+
+    // Print debug info
+    char dbg[80];
+    sprintf(dbg, "📤 TX: type=%d, dst=%d, src=%d, msg_id=%d\r\n",
+            type, dst, src, msg_id);
+    printu(dbg);
+
+    if (payload_len > 0) {
+        sprintf(dbg, "    Payload: %s\r\n", payload);
+        printu(dbg);
+    }
+
+    // Build complete packet in txBuf
+    memcpy(txBuf, &hdr, sizeof(MeshHeader));
+    if (payload_len > 0) {
+        memcpy(txBuf + sizeof(MeshHeader), payload, payload_len);
+    }
+
+    // Transmit using existing LoRa library function
+    uint16_t tx = LoRa_transmit(&myLoRa, txBuf, total_len, 2000);
+
+    // After TX, resume RX
+    LoRa_startReceiving(&myLoRa);
+
+    return (tx == 1) ? 1 : 0;
+}
 uint8_t LoRa_Transmit(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id)
 {
     MeshHeader hdr;
@@ -751,7 +783,6 @@ uint8_t LoRa_Transmit(uint8_t type, uint8_t dst, uint8_t src, const char *payloa
     }
     return 0;
 }
-
 /* ---------- Main polling function with MeshHeader ---------- */
 void LoRa_StartPollingnode(void)
 {

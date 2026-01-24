@@ -3,21 +3,21 @@
 	<item key="hasShownOverlayPopupBefore" value="true"/>
 	<item key="replaceBarOpen" value="false"/>
 	<list key="searchhistory">
+		<item value="Radio "/>
+		<item value="req_Registration"/>
+		<item value="printu"/>
 		<item value="LoRa_getMode"/>
 		<item value="RXCONT_MODE"/>
 		<item value="handle_req_data"/>
 		<item value="TX"/>
 		<item value="PKT_ACK"/>
 		<item value="LoRa_StartPollingnode"/>
-		<item value="printu"/>
 		<item value="LoRa_startReceiving(&amp;myLoRa);"/>
 		<item value="wait_for_ack"/>
 		<item value="PKT_REQ_ADDRESS"/>
-		<item value="req_Registration"/>
 		<item value="sendMeshPacket"/>
 		<item value="REQ_ADDRESS"/>
 		<item value="handleIncomingData"/>
-		<item value="rx"/>
 	</list>
 	<list key="replacehistory">
 		<item value="LoRa_gotoMode"/>
