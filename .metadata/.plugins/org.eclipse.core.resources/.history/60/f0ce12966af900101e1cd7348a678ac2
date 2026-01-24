@@ -1,0 +1,4 @@
+../Core/Src/main.c:82:5:main	3
+../Core/Src/main.c:192:6:SystemClock_Config	3
+../Core/Src/main.c:280:6:STM32_GetUID	1
+../Core/Src/main.c:293:6:Error_Handler	1

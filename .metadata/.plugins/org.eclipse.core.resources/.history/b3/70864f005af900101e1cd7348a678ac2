@@ -1,0 +1,30 @@
+/*
+ * Mesh.h
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+
+#ifndef INC_MESH_H_
+#define INC_MESH_H_
+
+#include "gpio.h"
+#include "stm32f1xx.h"
+#include "string.h"
+
+extern uint32_t lastActivityTime;
+extern uint32_t watchdogTimeout;
+
+extern uint8_t txBuf[];
+
+void Mesh_reset_watchdog(void);
+void Mesh_check_watchdog(void);
+
+/**************************************************************************************************************/
+
+										//  LoRa ***IMP*** Functions //
+
+/**************************************************************************************************************/
+uint8_t LoRa_Transmit_ack(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id);
+
+#endif /* INC_MESH_H_ */

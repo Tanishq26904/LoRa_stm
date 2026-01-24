@@ -1,0 +1,110 @@
+/*
+ * Mesh.c
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+#include "Mesh.h"
+#include "usart.h"
+#include "gpio.h"
+#include "LoRa.h"
+
+uint32_t lastActivityTime = 0;
+uint32_t watchdogTimeout = 30000;
+uint8_t radioErrorCount = 0;
+uint32_t lastResetTime = 0;
+uint32_t lcg_seed = 0;
+
+#define DUP_CACHE_SIZE        16
+typedef struct {
+  uint8_t src;
+  uint16_t msg_id;
+} SeenPacket;
+SeenPacket seenPackets[DUP_CACHE_SIZE];
+uint8_t seenIndex = 0;
+
+void Mesh_reset_watchdog(void) {
+    lastActivityTime = HAL_GetTick();
+}
+
+void Mesh_check_watchdog(void) {
+    if (HAL_GetTick() - lastActivityTime > watchdogTimeout) {
+        for (int i = 0; i < 5; i++) {
+            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);
+            HAL_Delay(100);
+        }
+        NVIC_SystemReset();
+    }
+}
+
+void Mesh_hard_reset_radio(void) {
+    // Hard reset the radio
+    HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_RESET);
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+
+    // Ensure NSS is high
+    HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_SET);
+    HAL_Delay(10);
+
+    radioErrorCount = 0;
+    lastResetTime = HAL_GetTick();
+}
+
+uint8_t Mesh_isDuplicate(uint8_t src, uint16_t msg_id)
+{
+  for (uint8_t i = 0; i < DUP_CACHE_SIZE; i++)
+  {
+    if (seenPackets[i].src == src &&
+        seenPackets[i].msg_id == msg_id)
+    {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+void Mesh_rememberPacket(uint8_t src, uint16_t msg_id)
+{
+  seenPackets[seenIndex].src = src;
+  seenPackets[seenIndex].msg_id = msg_id;
+
+  seenIndex++;
+  if (seenIndex >= DUP_CACHE_SIZE)
+    seenIndex = 0;
+}
+
+uint32_t Mesh_lcg_rand(void)
+{
+    lcg_seed = (1103515245 * lcg_seed + 12345);
+    return (lcg_seed >> 16) & 0x7FFF;
+}
+
+float Mesh_rand_range(float min, float max)
+{
+    return min + ((float)Mesh_lcg_rand() / 32767.0f) * (max - min);
+}
+
+uint8_t Mesh_check_radio_status(LoRa *radio)
+{
+    uint8_t version = LoRa_read(radio, RegVersion);
+    if (version != 0x12) {
+        return 0;
+    }
+
+    uint8_t op_mode = LoRa_read(radio, RegOpMode);
+    uint8_t mode = op_mode & 0x07;
+
+    if (mode != 0x01 && mode != 0x03 && mode != 0x05) {
+        return 0;
+    }
+    return 1;
+}
+/**************************************************************************************************************/
+
+										//  LoRa ***IMP*** Functions //
+
+/**************************************************************************************************************/
+
+

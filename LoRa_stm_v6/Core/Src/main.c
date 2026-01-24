@@ -136,7 +136,6 @@ uint8_t LoRa_Transmit_ack(uint8_t type, uint8_t dst, uint8_t src, const char *pa
 uint8_t LoRa_Transmit(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id);
 void LoRa_StartPollingnode(void);
 void handle_req_data(uint8_t src_id, uint16_t msg_id);
-void flash_clear_storage(void);
 void check_clear_button(void);
 uint8_t isDuplicate(uint8_t src, uint16_t msg_id);
 void rememberPacket(uint8_t src, uint16_t msg_id);
@@ -991,27 +990,6 @@ uint32_t calculate_checksum(uint32_t counter, uint32_t device_id) {
     return counter ^ device_id ^ 0xDEADBEEF;
 }
 
-void flash_clear_storage(void) {
-#ifdef USE_UART
-    printu("\r\n=== CLEARING FLASH STORAGE ===\r\n");
-#endif
-
-    flash_erase_node_page();
-
-    nodeId = 0;
-
-#ifdef USE_UART
-    printu("✓ Flash storage cleared\r\n");
-    printu("✓ Node ID reset to 00\r\n");
-    printu("=== Device will restart registration ===\r\n\r\n");
-#endif
-
-    for(int i = 0; i < 5; i++) {
-        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);
-        HAL_Delay(200);
-    }
-}
-
 void check_clear_button(void) {
     static uint32_t press_start_time = 0;
     static uint8_t is_clearing = 0;
@@ -1025,7 +1003,7 @@ void check_clear_button(void) {
         }
         else if (!is_clearing && (HAL_GetTick() - press_start_time) > 3000) {
             is_clearing = 1;
-            flash_clear_storage();
+            //flash_clear_storage();
             while (HAL_GPIO_ReadPin(Erase_GPIO_Port, Erase_Pin) == GPIO_PIN_RESET) {
                 HAL_Delay(10);
             }

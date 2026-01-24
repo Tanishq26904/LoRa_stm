@@ -1,0 +1,113 @@
+#ifndef MESH_LIB_H
+#define MESH_LIB_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Includes ------------------------------------------------------------------*/
+#include <stdint.h>
+#include <stdarg.h>
+#include "stm32f1xx_hal.h"  // Add HAL for types
+
+/* Forward declaration for LoRa structure */
+struct LoRa_setting;
+typedef struct LoRa_setting LoRa;
+
+/* Constants -----------------------------------------------------------------*/
+#define MESH_VERSION          0x01
+#define PKT_REQ_ADDRESS       0x01
+#define PKT_ACK_ADDRESS       0x02
+#define PKT_REQ_DATA          0x03
+#define PKT_SENSOR_DATA       0x04
+#define PKT_ACK               0x05
+#define PKT_MASTER_ADV        0x06
+
+#define DUP_CACHE_SIZE        16
+#define DBG_BUF_SIZE          128
+
+#define MASTER_TIMEOUT_MS     10000
+#define ROUTING_WINDOW_MS     30000
+
+#define FLASH_STORAGE_START  0x0800FC00
+#define FLASH_MAGIC_NUMBER   0x55AA1234
+
+/* Typedefs ------------------------------------------------------------------*/
+typedef struct __attribute__((packed)) {
+    uint8_t  version;
+    uint8_t  type;
+    uint8_t  src;
+    uint8_t  dest;
+    uint8_t  ttl;
+    uint8_t  flags;
+    uint16_t msg_id;
+    uint8_t payload_len;
+} MeshHeader;
+
+typedef struct {
+    uint8_t src;
+    uint16_t msg_id;
+} SeenPacket;
+
+typedef enum {
+    PHASE_ROUTING,
+    PHASE_REGISTRATION,
+    PHASE_NORMAL
+} mesh_phase_t;
+
+/* Library initialization */
+void mesh_lib_init(LoRa *lora_instance, uint32_t uid[3]);
+
+/* Core mesh functions */
+uint8_t mesh_send_packet(LoRa *lora, uint8_t type, uint8_t dst, uint8_t src,
+                        const char *payload, uint16_t msg_id);
+uint8_t mesh_wait_for_ack(LoRa *lora, uint32_t uid[3], uint16_t timeout_ms);
+
+/* Packet handling */
+uint8_t mesh_receive_packet(LoRa *lora, uint8_t *buffer, uint16_t buffer_len,
+                           MeshHeader *header, char *payload, uint16_t *payload_len);
+uint8_t mesh_is_duplicate(uint8_t src, uint16_t msg_id);
+void mesh_remember_packet(uint8_t src, uint16_t msg_id);
+void mesh_clear_duplicate_cache(void);
+
+/* Sensor data handling */
+void mesh_generate_sensor_data(char *buffer, uint16_t buffer_size);
+void mesh_handle_data_request(LoRa *lora, uint8_t src_id, uint16_t msg_id, uint8_t node_id);
+
+/* Utility functions */
+uint16_t mesh_generate_msg_id(void);
+uint8_t mesh_validate_header(MeshHeader *header);
+void mesh_set_debug_uart(UART_HandleTypeDef *uart_handle);
+void mesh_print_debug(const char *format, ...);
+
+/* Configuration */
+void mesh_set_node_id(uint8_t id);
+uint8_t mesh_get_node_id(void);
+void mesh_set_master_mode(uint8_t is_master);
+void mesh_set_phase(mesh_phase_t phase);
+
+/* Flash storage */
+void mesh_flash_erase_page(void);
+uint8_t mesh_flash_read_node_id(void);
+void mesh_flash_save_node_id(uint8_t node_id);
+void mesh_flash_clear_storage(void);
+
+/* Watchdog */
+void mesh_reset_watchdog(void);
+void mesh_check_watchdog(void);
+void mesh_set_watchdog_timeout(uint32_t timeout_ms);
+
+/* Radio management */
+void mesh_hard_reset_radio(LoRa *lora, GPIO_TypeDef* reset_port, uint16_t reset_pin);
+void mesh_check_radio_health(LoRa *lora);
+uint8_t mesh_check_radio_status(LoRa *lora);
+uint8_t mesh_wait_for_tx_complete(LoRa *lora);
+
+/* Global variable for routing phase timing */
+extern uint32_t routing_start_time;
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* MESH_LIB_H */

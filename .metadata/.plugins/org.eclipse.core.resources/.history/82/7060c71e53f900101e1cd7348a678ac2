@@ -1,0 +1,23 @@
+/*
+ * Mesh.h
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+
+#ifndef INC_MESH_H_
+#define INC_MESH_H_
+
+
+#include "gpio.h"
+#include "stm32f1xx.h"
+
+extern uint8_t radioErrorCount;
+extern uint32_t lastResetTime;
+extern uint32_t lastActivityTime;
+extern uint32_t watchdogTimeout;
+
+void Mesh_hard_reset_radio(void);
+void Mesh_check_watchdog(void);
+
+#endif /* INC_MESH_H_ */

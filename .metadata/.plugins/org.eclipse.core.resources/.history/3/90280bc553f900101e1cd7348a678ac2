@@ -1,0 +1,438 @@
+#include "Mesh.h"
+#include "LoRa.h"
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+
+/* Private variables ---------------------------------------------------------*/
+static SeenPacket seenPackets[DUP_CACHE_SIZE];
+static uint8_t seenIndex = 0;
+static uint8_t nodeId = 0;
+static uint32_t lastActivityTime = 0;
+static uint32_t watchdogTimeout = 30000;
+static uint8_t isMaster = 0;
+static mesh_phase_t currentPhase = PHASE_ROUTING;
+static uint32_t deviceUID[3];
+static UART_HandleTypeDef *debugUart = NULL;
+static LoRa *loraInstance = NULL;
+
+static uint32_t lcg_seed = 0;
+uint32_t routing_start_time = 0;
+
+/* Private function prototypes -----------------------------------------------*/
+static uint32_t lcg_rand(void);
+static float rand_range(float min, float max);
+/* Remove the unused printu function from here */
+
+/* Library initialization ----------------------------------------------------*/
+void mesh_lib_init(LoRa *lora_instance, uint32_t uid[3])
+{
+    loraInstance = lora_instance;
+    memcpy(deviceUID, uid, sizeof(deviceUID));
+    lcg_seed = HAL_GetTick();
+    mesh_clear_duplicate_cache();
+    lastActivityTime = HAL_GetTick();
+}
+
+/* Debug printing -----------------------------------------------------------*/
+void mesh_set_debug_uart(UART_HandleTypeDef *uart_handle)
+{
+    debugUart = uart_handle;
+}
+
+void mesh_print_debug(const char *format, ...)
+{
+    if (!debugUart) return;
+
+    char buffer[DBG_BUF_SIZE];
+    va_list args;
+    va_start(args, format);
+    int len = vsnprintf(buffer, DBG_BUF_SIZE, format, args);
+    va_end(args);
+
+    if (len > 0) {
+        HAL_UART_Transmit(debugUart, (uint8_t*)buffer, len, 200);
+    }
+}
+
+/* Packet transmission -------------------------------------------------------*/
+uint8_t mesh_send_packet(LoRa *lora, uint8_t type, uint8_t dst, uint8_t src,
+                        const char *payload, uint16_t msg_id)
+{
+    MeshHeader hdr;
+    uint8_t payload_len = payload ? strlen(payload) : 0;
+    uint8_t txBuf[256];
+    uint16_t total_len = sizeof(MeshHeader) + payload_len;
+
+    if (total_len > sizeof(txBuf)) {
+        mesh_print_debug("❌ TX error: Packet too large\r\n");
+        return 0;
+    }
+
+    // Build header
+    hdr.version = MESH_VERSION;
+    hdr.type = type;
+    hdr.src = src;
+    hdr.dest = dst;
+    hdr.ttl = 5;
+    hdr.flags = 0;
+    hdr.msg_id = msg_id;
+    hdr.payload_len = payload_len;
+
+    // Build complete packet
+    memcpy(txBuf, &hdr, sizeof(MeshHeader));
+    if (payload_len > 0) {
+        memcpy(txBuf + sizeof(MeshHeader), payload, payload_len);
+    }
+
+    // Ensure radio is in standby mode for TX
+    LoRa_gotoMode(lora, STNBY_MODE);
+    HAL_Delay(2);
+
+    // Clear any pending IRQ flags
+    LoRa_write(lora, RegIrqFlags, 0xFF);
+
+    // Print debug info
+    mesh_print_debug("📤 TX: type=%d, dst=%d, src=%d, msg_id=%d\r\n",
+                     type, dst, src, msg_id);
+
+    if (payload_len > 0 && payload_len < 50) {
+        mesh_print_debug("    Payload: %s\r\n", payload);
+    }
+
+    // Transmit with timeout
+    uint16_t tx_result = LoRa_transmit(lora, txBuf, total_len, 2000);
+
+    // Return to RX mode
+    LoRa_startReceiving(lora);
+
+    return (tx_result == 1) ? 1 : 0;
+}
+
+/* Wait for ACK -------------------------------------------------------------*/
+uint8_t mesh_wait_for_ack(LoRa *lora, uint32_t uid[3], uint16_t timeout_ms)
+{
+    mesh_print_debug("⌛ Waiting for ACK...\r\n");
+    uint32_t start = HAL_GetTick();
+    uint8_t rxBuf[256];
+    MeshHeader header;
+    char payloadBuf[128];
+    uint16_t payload_len;
+
+    while ((HAL_GetTick() - start) < timeout_ms)
+    {
+        uint8_t len = LoRa_receive(lora, rxBuf, sizeof(rxBuf) - 1);
+        if (len > 0)
+        {
+            if (mesh_receive_packet(lora, rxBuf, len, &header, payloadBuf, &payload_len)) {
+                // Check packet type
+                if (header.type != PKT_ACK_ADDRESS) {
+                    continue;
+                }
+
+                // Check duplicate
+                if (mesh_is_duplicate(header.src, header.msg_id)) {
+                    mesh_print_debug("🛑 Duplicate packet\r\n");
+                    continue;
+                }
+
+                mesh_remember_packet(header.src, header.msg_id);
+
+                // Parse payload: format is "UID|nodeId"
+                uint32_t r_uid0 = 0, r_uid1 = 0, r_uid2 = 0;
+                unsigned int assignedId = 0;
+
+                int parsed = sscanf(payloadBuf,
+                                    "%08lX-%08lX-%08lX|%u",
+                                    &r_uid0, &r_uid1, &r_uid2,
+                                    &assignedId);
+
+                if (parsed == 4)
+                {
+                    if (r_uid0 == uid[0] && r_uid1 == uid[1] && r_uid2 == uid[2])
+                    {
+                        mesh_print_debug("✅ Node ID assigned: %d\r\n", assignedId);
+                        return (uint8_t)assignedId;
+                    } else {
+                        mesh_print_debug("❌ UID mismatch in ACK\r\n");
+                    }
+                } else {
+                    mesh_print_debug("❌ ACK parse failed\r\n");
+                }
+            }
+        }
+        HAL_Delay(2);
+    }
+
+    mesh_print_debug("⏱️ Timeout waiting for ACK\r\n");
+    return 0xFF;
+}
+
+/* Packet reception ----------------------------------------------------------*/
+uint8_t mesh_receive_packet(LoRa *lora, uint8_t *buffer, uint16_t buffer_len,
+                           MeshHeader *header, char *payload, uint16_t *payload_len)
+{
+    if (buffer_len < sizeof(MeshHeader)) {
+        return 0;
+    }
+
+    memcpy(header, buffer, sizeof(MeshHeader));
+
+    if (header->version != MESH_VERSION) {
+        return 0;
+    }
+
+    // Extract payload
+    uint8_t payloadStart = sizeof(MeshHeader);
+    uint8_t actualPayloadLen = header->payload_len;
+
+    if (actualPayloadLen > (buffer_len - payloadStart)) {
+        actualPayloadLen = buffer_len - payloadStart;
+    }
+
+    if (payload_len) {
+        *payload_len = actualPayloadLen;
+    }
+
+    if (payload && actualPayloadLen > 0) {
+        memcpy(payload, &buffer[payloadStart], actualPayloadLen);
+        payload[actualPayloadLen] = '\0';
+    }
+
+    return 1;
+}
+
+/* Duplicate packet handling -------------------------------------------------*/
+uint8_t mesh_is_duplicate(uint8_t src, uint16_t msg_id)
+{
+    for (uint8_t i = 0; i < DUP_CACHE_SIZE; i++) {
+        if (seenPackets[i].src == src && seenPackets[i].msg_id == msg_id) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void mesh_remember_packet(uint8_t src, uint16_t msg_id)
+{
+    seenPackets[seenIndex].src = src;
+    seenPackets[seenIndex].msg_id = msg_id;
+
+    seenIndex++;
+    if (seenIndex >= DUP_CACHE_SIZE) {
+        seenIndex = 0;
+    }
+}
+
+void mesh_clear_duplicate_cache(void)
+{
+    memset(seenPackets, 0, sizeof(seenPackets));
+    seenIndex = 0;
+}
+
+/* Sensor data handling ------------------------------------------------------*/
+void mesh_generate_sensor_data(char *buffer, uint16_t buffer_size)
+{
+    float dp = rand_range(1200.0f, 1300.0f);
+    float t_in = rand_range(10.0f, 20.0f);
+    float t_out = rand_range(170.0f, 190.0f);
+    float p_header = rand_range(55.0f, 65.0f);
+    float pm = rand_range(10.0f, 15.0f);
+    uint8_t cleaning = (lcg_rand() % 2) ? 1 : 0;
+
+    snprintf(buffer, buffer_size,
+             "%.1f,%.1f,%.1f,%.1f,%.1f,%d",
+             dp, t_in, t_out, p_header, pm, cleaning);
+}
+
+void mesh_handle_data_request(LoRa *lora, uint8_t src_id, uint16_t msg_id, uint8_t node_id)
+{
+    char payload[128];
+    mesh_generate_sensor_data(payload, sizeof(payload));
+    mesh_send_packet(lora, PKT_SENSOR_DATA, src_id, node_id, payload, msg_id);
+}
+
+/* Utility functions ---------------------------------------------------------*/
+uint16_t mesh_generate_msg_id(void)
+{
+    return lcg_rand() & 0xFFFF;
+}
+
+uint8_t mesh_validate_header(MeshHeader *header)
+{
+    return (header->version == MESH_VERSION) ? 1 : 0;
+}
+
+/* Configuration -------------------------------------------------------------*/
+void mesh_set_node_id(uint8_t id)
+{
+    nodeId = id;
+}
+
+uint8_t mesh_get_node_id(void)
+{
+    return nodeId;
+}
+
+void mesh_set_master_mode(uint8_t is_master)
+{
+    isMaster = is_master;
+}
+
+void mesh_set_phase(mesh_phase_t phase)
+{
+    currentPhase = phase;
+    if (phase == PHASE_ROUTING) {
+        routing_start_time = HAL_GetTick();
+    }
+}
+
+/* Watchdog functions --------------------------------------------------------*/
+void mesh_reset_watchdog(void)
+{
+    lastActivityTime = HAL_GetTick();
+}
+
+void mesh_check_watchdog(void)
+{
+    if (HAL_GetTick() - lastActivityTime > watchdogTimeout) {
+        mesh_print_debug("⚠️ Watchdog timeout - resetting\r\n");
+        NVIC_SystemReset();
+    }
+}
+
+void mesh_set_watchdog_timeout(uint32_t timeout_ms)
+{
+    watchdogTimeout = timeout_ms;
+}
+
+/* Radio management ---------------------------------------------------------*/
+void mesh_hard_reset_radio(LoRa *lora, GPIO_TypeDef* reset_port, uint16_t reset_pin)
+{
+    (void)lora; // Not used in this implementation
+
+    mesh_print_debug("Resetting radio...\r\n");
+    HAL_GPIO_WritePin(reset_port, reset_pin, GPIO_PIN_RESET);
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(reset_port, reset_pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+}
+
+void mesh_check_radio_health(LoRa *lora)
+{
+    static uint32_t lastCheck = 0;
+
+    if (HAL_GetTick() - lastCheck > 5000) {
+        uint8_t version = LoRa_read(lora, RegVersion);
+        if (version != 0x12) {
+            mesh_print_debug("⚠️ Radio version mismatch: 0x%02X\r\n", version);
+        }
+        lastCheck = HAL_GetTick();
+    }
+}
+
+uint8_t mesh_check_radio_status(LoRa *lora)
+{
+    uint8_t version = LoRa_read(lora, RegVersion);
+    if (version != 0x12) {
+        mesh_print_debug("Radio version wrong: 0x%02X\r\n", version);
+        return 0;
+    }
+
+    uint8_t op_mode = LoRa_read(lora, RegOpMode);
+    uint8_t mode = op_mode & 0x07;
+
+    if (mode != 0x01 && mode != 0x03 && mode != 0x05) {
+        mesh_print_debug("Radio in wrong mode: 0x%02X\r\n", mode);
+        return 0;
+    }
+
+    return 1;
+}
+
+uint8_t mesh_wait_for_tx_complete(LoRa *lora)
+{
+    uint32_t start = HAL_GetTick();
+    while ((HAL_GetTick() - start) < 1000) {
+        uint8_t irq_flags = LoRa_read(lora, RegIrqFlags);
+        if (irq_flags & 0x08) {
+            LoRa_write(lora, RegIrqFlags, 0xFF);
+            return 1;
+        }
+        HAL_Delay(1);
+    }
+    mesh_print_debug("❌ TX timeout\r\n");
+    return 0;
+}
+
+/* Flash storage ------------------------------------------------------------*/
+void mesh_flash_erase_page(void)
+{
+    HAL_FLASH_Unlock();
+
+    FLASH_EraseInitTypeDef erase = {0};
+    erase.TypeErase = FLASH_TYPEERASE_PAGES;
+    erase.PageAddress = FLASH_STORAGE_START;
+    erase.NbPages = 1;
+
+    uint32_t page_error = 0;
+    HAL_FLASHEx_Erase(&erase, &page_error);
+
+    HAL_FLASH_Lock();
+}
+
+uint8_t mesh_flash_read_node_id(void)
+{
+    uint32_t* data = (uint32_t*)FLASH_STORAGE_START;
+
+    if (data[0] == FLASH_MAGIC_NUMBER) {
+        uint32_t node_id = data[1]; // counter field
+        if (node_id <= 99 && node_id != 0) {
+            return (uint8_t)node_id;
+        }
+    }
+    return 0xFF;
+}
+
+void mesh_flash_save_node_id(uint8_t node_id)
+{
+    uint32_t device_id = (deviceUID[0] ^ deviceUID[1] ^ deviceUID[2]) & 0x00FFFFFF;
+    uint32_t checksum = node_id ^ device_id ^ 0xDEADBEEF;
+
+    uint32_t data[4] = {
+        FLASH_MAGIC_NUMBER,
+        node_id,
+        device_id,
+        checksum
+    };
+
+    mesh_flash_erase_page();
+
+    HAL_FLASH_Unlock();
+
+    for (uint32_t i = 0; i < 4; i++) {
+        HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD,
+                         FLASH_STORAGE_START + (i * 4),
+                         data[i]);
+    }
+
+    HAL_FLASH_Lock();
+}
+
+void mesh_flash_clear_storage(void)
+{
+    mesh_flash_erase_page();
+}
+
+/* Random number generation --------------------------------------------------*/
+static uint32_t lcg_rand(void)
+{
+    lcg_seed = (1103515245 * lcg_seed + 12345);
+    return (lcg_seed >> 16) & 0x7FFF;
+}
+
+static float rand_range(float min, float max)
+{
+    return min + ((float)lcg_rand() / 32767.0f) * (max - min);
+}

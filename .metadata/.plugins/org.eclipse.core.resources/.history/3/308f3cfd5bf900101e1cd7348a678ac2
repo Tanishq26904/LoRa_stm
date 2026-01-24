@@ -1,0 +1,32 @@
+/*
+ * Mesh.h
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+
+#ifndef INC_MESH_H_
+#define INC_MESH_H_
+
+#include "gpio.h"
+#include "stm32f1xx.h"
+#include "string.h"
+
+
+
+extern uint32_t lastActivityTime;
+extern uint32_t watchdogTimeout;
+extern uint8_t radioErrorCount;
+extern uint32_t lastResetTime;
+
+void Mesh_reset_watchdog(void);
+void Mesh_check_watchdog(void);
+void hard_reset_radio(void);
+
+/**************************************************************************************************************/
+
+										//  LoRa ***IMP*** Functions //
+
+/**************************************************************************************************************/
+
+#endif /* INC_MESH_H_ */

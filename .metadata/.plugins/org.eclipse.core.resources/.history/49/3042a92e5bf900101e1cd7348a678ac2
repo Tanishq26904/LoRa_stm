@@ -1,0 +1,54 @@
+/*
+ * Mesh.c
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+#include "Mesh.h"
+#include "usart.h"
+#include "gpio.h"
+#include "LoRa.h"
+
+uint32_t lastActivityTime = 0;
+uint32_t watchdogTimeout = 30000;
+uint8_t radioErrorCount = 0;
+uint32_t lastResetTime = 0;
+
+static uint8_t txBuf[256];
+
+void Mesh_reset_watchdog(void) {
+    lastActivityTime = HAL_GetTick();
+}
+
+void Mesh_check_watchdog(void) {
+    if (HAL_GetTick() - lastActivityTime > watchdogTimeout) {
+        for (int i = 0; i < 5; i++) {
+            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);
+            HAL_Delay(100);
+        }
+        NVIC_SystemReset();
+    }
+}
+
+void hard_reset_radio(void) {
+    // Hard reset the radio
+    HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_RESET);
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+
+    // Ensure NSS is high
+    HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_SET);
+    HAL_Delay(10);
+
+    radioErrorCount = 0;
+    lastResetTime = HAL_GetTick();
+}
+
+/**************************************************************************************************************/
+
+										//  LoRa ***IMP*** Functions //
+
+/**************************************************************************************************************/
+
+

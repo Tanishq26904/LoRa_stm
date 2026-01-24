@@ -1,0 +1,35 @@
+/*
+ * Mesh.c
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+#include "gpio.h"
+
+
+
+
+void hard_reset_radio(void) {
+    // Hard reset the radio
+    HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_RESET);
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(RESET_GPIO_Port, RESET_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+
+    // Ensure NSS is high
+    HAL_GPIO_WritePin(NSS_GPIO_Port, NSS_Pin, GPIO_PIN_SET);
+    HAL_Delay(10);
+
+    radioErrorCount = 0;
+    lastResetTime = HAL_GetTick();
+}
+
+void Mesh_check_watchdog(void) {
+    if (HAL_GetTick() - lastActivityTime > watchdogTimeout) {
+        for (int i = 0; i < 5; i++) {
+            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);
+            HAL_Delay(100);
+        }
+        NVIC_SystemReset();
+    }
+}

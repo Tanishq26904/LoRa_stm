@@ -1,0 +1,65 @@
+/*
+ * Mesh.h
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+
+#ifndef INC_MESH_H_
+#define INC_MESH_H_
+
+#include "gpio.h"
+#include "stm32f1xx.h"
+#include "string.h"
+
+#define MESH_VERSION          0x01
+#define PKT_REQ_ADDRESS       0x01
+#define PKT_ACK_ADDRESS       0x02
+#define PKT_REQ_DATA          0x03
+#define PKT_SENSOR_DATA       0x04
+#define PKT_ACK               0x05
+
+#define DUP_CACHE_SIZE        16
+#define DBG_BUF_SIZE          128
+
+#define USE_UART
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;          // Validation magic number
+    uint32_t counter;        // Persistent counter (we store node id here)
+    uint32_t device_id;      // Persistent device ID
+    uint32_t checksum;       // Simple checksum
+} stored_data_t;
+
+typedef struct __attribute__((packed)) {
+  uint8_t  version;
+  uint8_t  type;
+  uint8_t  src;
+  uint8_t  dest;
+  uint8_t  ttl;
+  uint8_t  flags;
+  uint16_t msg_id;
+  uint8_t payload_len;
+} MeshHeader;
+
+typedef struct {
+  uint8_t src;
+  uint16_t msg_id;
+} SeenPacket;
+
+extern uint32_t lastActivityTime;
+extern uint32_t watchdogTimeout;
+
+extern uint8_t txBuf[];
+
+void Mesh_reset_watchdog(void);
+void Mesh_check_watchdog(void);
+
+/**************************************************************************************************************/
+
+										//  LoRa ***IMP*** Functions //
+
+/**************************************************************************************************************/
+uint8_t LoRa_Transmit_ack(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id);
+
+#endif /* INC_MESH_H_ */

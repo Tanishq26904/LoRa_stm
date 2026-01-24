@@ -1,3 +1,5 @@
+#ifndef INC_LORA_H_
+#define INC_LORA_H_
 #include "main.h"
 
 #define TRANSMIT_TIMEOUT		2000
@@ -135,3 +137,4 @@ void LoRa_setCADSymbols(LoRa* _LoRa, uint8_t symbols);
 void LoRa_setCADExitMode(LoRa* _LoRa, uint8_t mode);
 
 uint16_t LoRa_init(LoRa* _LoRa);
+#endif

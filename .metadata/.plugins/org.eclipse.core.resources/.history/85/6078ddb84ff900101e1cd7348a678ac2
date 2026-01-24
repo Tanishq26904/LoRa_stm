@@ -1,0 +1,18 @@
+/*
+ * Mesh.h
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+
+#ifndef INC_MESH_H_
+#define INC_MESH_H_
+
+
+#include "gpio.h"
+#include "stm32f1xx.h"
+
+void hard_reset_radio(void);
+
+
+#endif /* INC_MESH_H_ */

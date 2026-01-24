@@ -1,0 +1,8 @@
+../Drivers/CMSIS/Include/core_cm3.h:1762:34:__NVIC_SystemReset	4	static,ignoring_inline_asm
+../Core/Src/main.c:88:5:main	64	static
+../Core/Src/main.c:162:6:STM32_GetUID	16	static
+../Core/Src/main.c:169:6:reset_watchdog	8	static
+../Core/Src/main.c:174:6:check_watchdog	8	static
+../Core/Src/main.c:183:6:hard_reset_radio	8	static
+../Core/Src/main.c:195:6:check_radio_health	16	static
+../Core/Src/main.c:221:6:Error_Handler	4	static,ignoring_inline_asm

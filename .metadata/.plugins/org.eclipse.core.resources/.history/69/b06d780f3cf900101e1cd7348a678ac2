@@ -1,0 +1,275 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body (clean RX model)
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2026 STMicroelectronics.
+  * All rights reserved.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "spi.h"
+#include "usart.h"
+#include "gpio.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include "LoRa.h"
+#include <stdint.h>
+#include <ctype.h>
+#include <stdlib.h>
+#include "stm32f1xx.h"
+#include "stm32f1xx_hal_flash.h"
+#include "stm32f1xx_hal_flash_ex.h"
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+#define FLASH_STORAGE_START  0x0800FC00  // Last 1KB of flash
+#define FLASH_MAGIC_NUMBER   0x55AA1234
+
+#define MESH_VERSION          0x01
+#define PKT_REQ_ADDRESS       0x01
+#define PKT_ACK_ADDRESS       0x02
+#define PKT_REQ_DATA          0x03
+#define PKT_SENSOR_DATA       0x04
+#define PKT_ACK               0x05
+#define PKT_MASTER_ADV  	  0x06
+
+
+#define DUP_CACHE_SIZE        16
+#define DBG_BUF_SIZE          128
+
+#define USE_UART
+
+#define MASTER_TIMEOUT_MS     10000
+#define ROUTING_WINDOW_MS     30000
+typedef struct __attribute__((packed)) {
+    uint32_t magic;          // Validation magic number
+    uint32_t counter;        // Persistent counter (we store node id here)
+    uint32_t device_id;      // Persistent device ID
+    uint32_t checksum;       // Simple checksum
+} stored_data_t;
+
+typedef struct __attribute__((packed)) {
+  uint8_t  version;
+  uint8_t  type;
+  uint8_t  src;
+  uint8_t  dest;
+  uint8_t  ttl;
+  uint8_t  flags;
+  uint16_t msg_id;
+  uint8_t payload_len;
+} MeshHeader;
+
+typedef struct {
+  uint8_t src;
+  uint16_t msg_id;
+} SeenPacket;
+
+typedef enum {
+    PHASE_ROUTING,
+    PHASE_REGISTRATION,
+    PHASE_NORMAL
+} mesh_phase_t;
+mesh_phase_t mesh_phase = PHASE_ROUTING;
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+/* USER CODE BEGIN PV */
+
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+  /* USER CODE BEGIN 1 */
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+  HAL_Init();
+
+  lcg_seed = HAL_GetTick();
+
+  /* USER CODE BEGIN Init */
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+  /* USER CODE END Init */
+
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+  /* USER CODE END SysInit */
+
+  MX_GPIO_Init();
+  MX_SPI1_Init();
+  MX_USART1_UART_Init();
+
+  /* USER CODE BEGIN 2 */
+    /* ---------- SX127x RESET ---------- */
+    hard_reset_radio();
+    HAL_Delay(100);
+
+    /* ---------- INIT LoRa STRUCT ---------- */
+    myLoRa = newLoRa();
+    myLoRa.CS_port    = NSS_GPIO_Port;
+    myLoRa.CS_pin     = NSS_Pin;
+    myLoRa.reset_port = RESET_GPIO_Port;
+    myLoRa.reset_pin  = RESET_Pin;
+    myLoRa.DIO0_port  = DIO0_GPIO_Port;
+    myLoRa.DIO0_pin   = DIO0_Pin;
+    myLoRa.hSPIx      = &hspi1;
+
+    LoRa_status = LoRa_init(&myLoRa);
+
+    if (LoRa_status != LORA_OK)
+    {
+      hard_reset_radio();
+      HAL_Delay(100);
+
+      LoRa_status = LoRa_init(&myLoRa);
+      if (LoRa_status != LORA_OK) {
+          while (1) {
+              check_clear_button();
+              HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);  // Blink LED to indicate error
+              HAL_Delay(500);
+          }
+      }
+    }
+
+    // Configure LoRa parameters to match ESP32 master
+    LoRa_setSyncWord(&myLoRa, 0x34);
+    LoRa_setSpreadingFactor(&myLoRa, 7);
+    LoRa_enableCRC(&myLoRa, 1);
+
+    /* ---------- SAFE FIFO SETUP ---------- */
+    LoRa_write(&myLoRa, RegFiFoRxBaseAddr, 0x00);
+    LoRa_write(&myLoRa, RegFiFoTxBaseAddr, 0x80);
+
+    /* ---------- START RX (single start) ---------- */
+    LoRa_startReceiving(&myLoRa);
+
+    // Verify radio configuration
+    uint8_t version = LoRa_read(&myLoRa, RegVersion);
+
+    STM32_GetUID(uid);
+
+    reset_watchdog();
+    lastResetTime = HAL_GetTick();
+
+    mesh_phase = PHASE_ROUTING;
+    routing_start_time = HAL_GetTick();
+
+    printu("🧭 Entering ROUTING phase (30s)\r\n");
+
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  while (1)
+  {
+      check_clear_button();
+      check_watchdog();
+
+      if(nodeId > 0)
+      {
+          reset_watchdog();
+          LoRa_StartPollingnode();
+      }
+      else
+      {
+          req_Registration();
+      }
+
+      check_radio_health();
+      HAL_Delay(100); // Increased from 10ms to reduce radio mode switching
+  }
+}
+
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1)
+  {
+  }
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif /* USE_FULL_ASSERT */

@@ -1,0 +1,124 @@
+/*
+ * Mesh.h
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+
+#ifndef INC_MESH_H_
+#define INC_MESH_H_
+
+#include "gpio.h"
+#include "stm32f1xx.h"
+#include "string.h"
+#include "LoRa.h"
+
+
+extern uint32_t lastActivityTime;
+extern uint32_t watchdogTimeout;
+extern uint8_t radioErrorCount;
+extern uint32_t lastResetTime;
+extern uint32_t lcg_seed;
+
+#define FLASH_STORAGE_START  0x0800FC00  // Last 1KB of flash
+#define FLASH_MAGIC_NUMBER   0x55AA1234
+
+#define MESH_VERSION          0x01
+#define PKT_REQ_ADDRESS       0x01
+#define PKT_ACK_ADDRESS       0x02
+#define PKT_REQ_DATA          0x03
+#define PKT_SENSOR_DATA       0x04
+#define PKT_ACK               0x05
+
+#define DUP_CACHE_SIZE        16
+#define DBG_BUF_SIZE          128
+
+typedef struct __attribute__((packed)) {
+  uint8_t  version;
+  uint8_t  type;
+  uint8_t  src;
+  uint8_t  dest;
+  uint8_t  ttl;
+  uint8_t  flags;
+  uint16_t msg_id;
+  uint8_t payload_len;
+} MeshHeader;
+
+void Mesh_reset_watchdog(void);
+void Mesh_check_watchdog(void);
+void Mesh_hard_reset_radio(void);
+
+uint8_t Mesh_isDuplicate(uint8_t src, uint16_t msg_id);
+void Mesh_rememberPacket(uint8_t src, uint16_t msg_id);
+
+uint32_t Mesh_lcg_rand(void);
+float Mesh_rand_range(float min, float max);
+
+
+uint8_t Mesh_check_radio_status(LoRa *radio);
+void Mesh_check_radio_health(LoRa *radio);
+uint8_t Mesh_wait_for_tx_complete(LoRa *radio);
+/**************************************************************************************************************/
+
+										//  LoRa ***IMP*** Functions //
+
+/**************************************************************************************************************/
+void Mesh_handle_req_data(
+    uint8_t src_id,
+    uint16_t msg_id,
+    uint8_t self_id,
+    char *payloadBuf,
+    size_t payloadBufLen
+);
+
+uint8_t Mesh_request_registration(
+    LoRa *radio,
+    uint32_t uid[3],
+    int *nodeId,
+    char *payloadBuf,
+    size_t payloadBufLen
+);
+
+uint8_t Mesh_wait_for_ack(
+    LoRa *radio,
+    uint32_t uid[3],
+    int *nodeId,
+    uint8_t *rxBuf,
+    size_t rxBufLen,
+    char *payloadBuf,
+    size_t payloadBufLen,
+    uint16_t timeout_ms
+);
+
+uint8_t Mesh_transmit_ack(
+    LoRa *radio,
+    uint8_t type,
+    uint8_t dst,
+    uint8_t src,
+    const char *payload,
+    uint16_t msg_id,
+    uint8_t *txBuf,
+    size_t txBufLen
+);
+
+uint8_t Mesh_transmit(
+    LoRa *radio,
+    uint8_t type,
+    uint8_t dst,
+    uint8_t src,
+    const char *payload,
+    uint16_t msg_id,
+    uint8_t *txBuf,
+    size_t txBufLen
+);
+
+void Mesh_poll(
+    LoRa *radio,
+    uint8_t self_id,
+    uint8_t *rxBuf,
+    size_t rxBufLen,
+    char *payloadBuf,
+    size_t payloadBufLen
+);
+
+#endif /* INC_MESH_H_ */

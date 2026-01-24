@@ -1,0 +1,36 @@
+#ifndef MESH_H
+#define MESH_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+
+/* Logging */
+void printu(const char *msg);
+void print_dbg(const char *format, ...);
+void print_node_id(uint8_t nodeId);
+void print_reset_reason(void);
+
+/* Mesh / LoRa functions */
+void req_Registration(void);
+uint8_t wait_for_ack(uint16_t timeout_ms);
+uint8_t LoRa_Transmit_ack(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id);
+uint8_t LoRa_Transmit(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id);
+void LoRa_StartPollingnode(void);
+void handle_req_data(uint8_t src_id, uint16_t msg_id);
+
+/* Duplicate suppression */
+uint8_t isDuplicate(uint8_t src, uint16_t msg_id);
+void rememberPacket(uint8_t src, uint16_t msg_id);
+
+/* RNG helpers used by sensor generation */
+uint32_t lcg_rand(void);
+float rand_range(float min, float max);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* MESH_H */

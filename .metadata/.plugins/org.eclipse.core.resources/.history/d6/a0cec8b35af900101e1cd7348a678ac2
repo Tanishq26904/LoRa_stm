@@ -1,0 +1,81 @@
+/*
+ * Mesh.c
+ *
+ *  Created on: Jan 24, 2026
+ *      Author: 22142
+ */
+#include "Mesh.h"
+#include "usart.h"
+#include "gpio.h"
+#include "LoRa.h"
+#include "string.h"
+
+uint32_t lastActivityTime = 0;
+uint32_t watchdogTimeout = 30000;
+
+uint8_t txBuf[256];
+
+void Mesh_reset_watchdog(void) {
+    lastActivityTime = HAL_GetTick();
+}
+
+void Mesh_check_watchdog(void) {
+    if (HAL_GetTick() - lastActivityTime > watchdogTimeout) {
+        for (int i = 0; i < 5; i++) {
+            HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_2);
+            HAL_Delay(100);
+        }
+        NVIC_SystemReset();
+    }
+}
+
+/**************************************************************************************************************/
+
+										//  LoRa ***IMP*** Functions //
+
+/**************************************************************************************************************/
+uint8_t LoRa_Transmit_ack(uint8_t type, uint8_t dst, uint8_t src, const char *payload, uint16_t msg_id)
+{
+    MeshHeader hdr;
+    uint8_t payload_len = payload ? strlen(payload) : 0;
+    uint16_t total_len = sizeof(MeshHeader) + payload_len;
+
+    hdr.version = MESH_VERSION;
+    hdr.type = type;
+    hdr.src = src;
+    hdr.dest = dst;
+    hdr.ttl = 5;
+    hdr.flags = 0;
+    hdr.msg_id = msg_id;
+    hdr.payload_len = payload_len;
+
+    // Ensure radio in standby before TX
+    LoRa_gotoMode(&myLoRa, STNBY_MODE);
+    HAL_Delay(2);
+
+    // Print debug info
+    char dbg[80];
+    sprintf(dbg, "📤 TX: type=%d, dst=%d, src=%d, msg_id=%d\r\n",
+            type, dst, src, msg_id);
+    printu(dbg);
+
+    if (payload_len > 0) {
+        sprintf(dbg, "    Payload: %s\r\n", payload);
+        printu(dbg);
+    }
+
+    // Build complete packet in txBuf
+    memcpy(txBuf, &hdr, sizeof(MeshHeader));
+    if (payload_len > 0) {
+        memcpy(txBuf + sizeof(MeshHeader), payload, payload_len);
+    }
+
+    // Transmit using existing LoRa library function
+    uint16_t tx = LoRa_transmit(&myLoRa, txBuf, total_len, 2000);
+
+    // After TX, resume RX
+    LoRa_startReceiving(&myLoRa);
+
+    return (tx == 1) ? 1 : 0;
+}
+

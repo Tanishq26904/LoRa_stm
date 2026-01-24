@@ -1,0 +1,16 @@
+../Core/Src/main.c:135:5:main	4
+../Core/Src/main.c:248:6:SystemClock_Config	3
+../Core/Src/main.c:285:6:printu	1
+../Core/Src/main.c:290:6:print_dbg	2
+../Core/Src/main.c:302:6:print_node_id	1
+../Core/Src/main.c:314:6:print_reset_reason	7
+../Core/Src/main.c:336:6:STM32_GetUID	1
+../Core/Src/main.c:343:6:check_radio_health	4
+../Core/Src/main.c:369:9:wait_for_tx_complete	3
+../Core/Src/main.c:387:6:req_Registration	2
+../Core/Src/main.c:424:9:wait_for_ack	14
+../Core/Src/main.c:519:9:LoRa_Transmit_ack	4
+../Core/Src/main.c:563:9:LoRa_Transmit	12
+../Core/Src/main.c:680:6:LoRa_StartPollingnode	19
+../Core/Src/main.c:800:6:handle_req_data	1
+../Core/Src/main.c:825:6:Error_Handler	1

@@ -1,0 +1,13 @@
+#include "Mesh.h"
+#include "LoRa.h"
+#include <string.h>
+#include <usart.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <stdlib.h>
+
+/* Private variables ---------------------------------------------------------*/
+void printu(const char *msg)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t*)msg, strlen(msg), 200);
+}
